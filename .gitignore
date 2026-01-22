@@ -1,0 +1,25 @@
+# --- ROS / colcon build artifacts (usually in workspace, but safe) ---
+build/
+install/
+log/
+
+# --- CMake / build ---
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+*~
+c_cpp_properties.json
+
+# --- Python cache (if any scripts) ---
+__pycache__/
+*.pyc
+
+# --- OS ---
+.DS_Store
