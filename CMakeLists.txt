@@ -75,12 +75,33 @@ target_link_libraries(kinematic_setpoint_node
   Eigen3::Eigen
 )
 
+# 4. Trajectory Node
+add_executable(joint_trajectory_node src/joint_trajectory.cpp)
+target_include_directories(joint_trajectory_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+ament_target_dependencies(joint_trajectory_node
+  rclcpp
+  geometry_msgs
+  nav_msgs
+  trajectory_msgs
+  sensor_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
+target_link_libraries(joint_trajectory_node
+  Eigen3::Eigen
+)
+
+
 # ---- Install ----
 
 install(TARGETS
   base_test_node
   dls
   kinematic_setpoint_node
+  joint_trajectory_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

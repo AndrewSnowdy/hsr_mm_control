@@ -13,6 +13,7 @@ using namespace std::chrono_literals;
 
 FinalPoseNode::FinalPoseNode()
 : Node("final_pose_node"),
+  state_(ControlState::IDLE),
   base_pos_x_(0.0),
   base_pos_y_(0.0),
   base_yaw_(0.0),  
@@ -145,8 +146,8 @@ void FinalPoseNode::tick() {
     }
 
 
-    if (state_ != ControlState::REACHED) {
-        Eigen::Vector3d cube_target(2.2, 0.0, 1.04);
+    if (state_ == ControlState::IDLE) {
+        Eigen::Vector3d cube_target(2.0, 0.0, 1.04);
         Eigen::VectorXd result = solveGlobalIK(cube_target);
 
         // CHECK 1: Did the solver return an empty vector (failure)?
@@ -257,8 +258,9 @@ void FinalPoseNode::publishGhostPose(const Eigen::VectorXd &q_goal)
   t.transform.rotation.y = q_tf.y();
   t.transform.rotation.z = q_tf.z();
   t.transform.rotation.w = q_tf.w();
-
   tf_broadcaster_->sendTransform(t);
+
+
 
   // ---- JointState: fill precomputed layout ----
   // Fill from latest q_map_ (fallback 0.0)
@@ -285,9 +287,20 @@ void FinalPoseNode::publishGhostPose(const Eigen::VectorXd &q_goal)
 
   sensor_msgs::msg::JointState js;
   js.header.stamp = now;
+
+  
   js.name = ghost_joint_names_;
   js.position = ghost_joint_pos_;
 
+  js.name.push_back("base_x");
+  js.position.push_back(q_goal[0]);
+
+  js.name.push_back("base_y");
+  js.position.push_back(q_goal[1]);
+
+  js.name.push_back("base_yaw");
+  js.position.push_back(std::atan2(q_goal[3], q_goal[2]));
+  
   ghost_joint_pub_->publish(js);
 }
 
