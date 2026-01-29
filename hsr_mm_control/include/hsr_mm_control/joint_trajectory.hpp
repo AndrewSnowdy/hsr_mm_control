@@ -42,11 +42,27 @@ private:
     rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr arm_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr base_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr state_sub_;
+
+    // To store the real-time state of the robot
+    std::map<std::string, double> current_arm_positions_;
+    double current_base_x_ = 0.0;
+    double current_base_y_ = 0.0;
+    double current_yaw_ = 0.0;
+
+    double current_vx_ = 0.0;
+    double current_vy_ = 0.0;
+    double current_vw_ = 0.0;
+
+    double current_s_;
+    double total_path_length_;
+    double final_goal_yaw_;
 
     std::map<std::string, QuinticSpline> splines_;
     std::vector<std::string> arm_joints_;
-    double current_yaw_ = 0.0;
     rclcpp::Time start_time_;
     bool is_executing_ = false;
-    double duration_ = 4.0;
+    double duration_ = 10.0;
+    const double lookahead = 0.20; 
+
 };

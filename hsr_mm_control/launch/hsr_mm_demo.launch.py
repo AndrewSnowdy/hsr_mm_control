@@ -21,12 +21,13 @@ def generate_launch_description():
     show_ghost = LaunchConfiguration('show_ghost')
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
 
+
     pkg_hsr_mm_control = get_package_share_directory('hsr_mm_control')
-    
-    # Path to URDF for the Ghost RSP
-    urdf_path = '/tmp/hsr.urdf'
+
+    urdf_path = os.path.join(pkg_hsr_mm_control, 'urdf', 'hsrb.urdf')
     with open(urdf_path, 'r') as f:
         robot_description_content = f.read()
+
 
     # --- Gazebo Logic ---
     hsrb_gazebo_common_path = os.path.join(

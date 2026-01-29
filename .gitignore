@@ -1,25 +1,10 @@
-# --- ROS / colcon build artifacts (usually in workspace, but safe) ---
-build/
-install/
-log/
+# Ignore everything in this directory (the src folder)
+/*
 
-# --- CMake / build ---
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-compile_commands.json
+# Specifically un-ignore your two packages
+!/hsr_mm_control/
+!/hsr_vision/
 
-# --- IDE / editor ---
-.vscode/
-.idea/
-*.swp
-*~
-c_cpp_properties.json
+# Make sure Git still tracks the .gitignore itself
+!/.gitignore
 
-# --- Python cache (if any scripts) ---
-__pycache__/
-*.pyc
-
-# --- OS ---
-.DS_Store

@@ -1,0 +1,198 @@
+#include "hsr_mm_control/joint_trajectory.hpp"
+
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+
+#include <cmath>
+#include <algorithm>
+
+void QuinticSpline::solve(double q0, double qf, double v0, double vf, double a0, double af, double T){
+    T_ = T;
+    Eigen::MatrixXd M(6, 6);
+    M << 1, 0, 0, 0, 0, 0,
+         0, 1, 0, 0, 0, 0,
+         0, 0, 2, 0, 0, 0,
+         1, T, pow(T,2), pow(T,3), pow(T,4), pow(T,5),
+         0, 1, 2*T, 3*pow(T,2), 4*pow(T,3), 5*pow(T,4),
+         0, 0, 2, 6*T, 12*pow(T,2), 20*pow(T, 3);
+
+    Eigen::VectorXd b(6);
+    b << q0, v0, a0, qf, vf, af;
+    a_ = M.colPivHouseholderQr().solve(b);
+}
+
+double QuinticSpline::get_pos(double t) const {
+    if (t <= 0) return a_[0];
+    if (t >= T_) t = T_; 
+
+    return a_[0] + 
+           a_[1]*t + 
+           a_[2]*std::pow(t, 2) + 
+           a_[3]*std::pow(t, 3) + 
+           a_[4]*std::pow(t, 4) + 
+           a_[5]*std::pow(t, 5);
+}
+
+double QuinticSpline::get_vel(double t) const {
+    if (t <= 0 || t >= T_) return 0.0;
+    return a_[1] + 2*a_[2]*t + 3*a_[3]*pow(t,2) + 4*a_[4]*pow(t,3) + 5*a_[5]*pow(t,4);
+}
+
+JointTrajectoryController::JointTrajectoryController() : Node("joint_trajectory_controller") {
+    goal_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+        "/ghost_joint_states", 10,
+        std::bind(&JointTrajectoryController::on_goal_recieved, this, std::placeholders::_1)
+    );
+
+    odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        "/odom", 10,
+        std::bind(&JointTrajectoryController::odom_callback, this, std::placeholders::_1)
+    );
+
+    state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+        "/joint_states", 10,
+        [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+            for (size_t i = 0; i < msg->name.size(); ++i) {
+                current_arm_positions_[msg->name[i]] = msg->position[i];
+            }
+        }
+    );
+
+
+    arm_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/arm_trajectory_controller/joint_trajectory", 10);
+    base_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/omni_base_controller/cmd_vel", 10);
+
+    timer_ = this->create_wall_timer(std::chrono::milliseconds(20), std::bind(&JointTrajectoryController::timer_callback, this));
+
+    arm_joints_ = {"arm_lift_joint", "arm_flex_joint", "arm_roll_joint", "wrist_flex_joint", "wrist_roll_joint"};
+
+}
+
+void JointTrajectoryController::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    current_base_x_ = msg->pose.pose.position.x;
+    current_base_y_ = msg->pose.pose.position.y;
+
+    current_vx_ = msg->twist.twist.linear.x;
+    current_vy_ = msg->twist.twist.linear.y;
+    current_vw_ = msg->twist.twist.angular.z;
+
+    tf2::Quaternion q(msg->pose.pose.orientation.x, msg->pose.pose.orientation.y,
+                      msg->pose.pose.orientation.z, msg->pose.pose.orientation.w);
+    double r, p, y;
+    tf2::Matrix3x3(q).getRPY(r, p, y);
+    current_yaw_ = y;
+}
+
+void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointState::SharedPtr msg) {
+    if (is_executing_) return;
+
+    std::unordered_map<std::string, double> goal;
+    for (size_t i = 0; i < msg->name.size(); ++i) goal[msg->name[i]] = msg->position[i];
+
+    // 1. Calculate Distance (L)
+    double dx = (goal.count("base_x") ? goal["base_x"] : current_base_x_) - current_base_x_;
+    double dy = (goal.count("base_y") ? goal["base_y"] : current_base_y_) - current_base_y_;
+    double L = std::hypot(dx, dy);
+
+    // 2. The Distance Guard
+    // If the base isn't moving, we use a virtual distance of 1.0 so the arm can still move.
+    total_path_length_ = (L < 0.01) ? 1.0 : L;
+
+    // 3. Solve Splines using L as the "End Time"
+    splines_["base_x"].solve(current_base_x_, goal["base_x"], 0, 0, 0, 0, total_path_length_);
+    splines_["base_y"].solve(current_base_y_, goal["base_y"], 0, 0, 0, 0, total_path_length_);
+    splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], 0, 0, 0, 0, total_path_length_);
+
+    for (const auto& name : arm_joints_) {
+        double q0 = current_arm_positions_[name];
+        double qf = goal.count(name) ? goal[name] : q0;
+        splines_[name].solve(q0, qf, 0, 0, 0, 0, total_path_length_);
+    }
+
+    current_s_ = 0.0;
+    is_executing_ = true;
+}
+
+void JointTrajectoryController::timer_callback() {
+    if (!is_executing_) return;
+
+    // --- 1. PROGRESS TRACKING ---
+    double dt = 0.02;
+    double cruise_vel = 0.03; // Speed in meters per second
+    const double MAX_POS_ERROR = 0.15; // 15 cm
+    const double MAX_YAW_ERROR = 0.26; // ~15 degrees
+    
+    
+    // Increment 's' instead of using clock 't'
+    current_s_ += cruise_vel * dt;
+
+    if (current_s_ >= total_path_length_) {
+        current_s_ = total_path_length_;
+        is_executing_ = false;
+        base_pub_->publish(geometry_msgs::msg::Twist());
+        return;
+    }
+
+    // --- 1. SET TARGETS FROM SPLINE ---
+    double target_x = splines_["base_x"].get_pos(current_s_);
+    double target_vx = splines_["base_x"].get_vel(current_s_) * cruise_vel;
+
+    double target_y = splines_["base_y"].get_pos(current_s_);
+    double target_vy = splines_["base_y"].get_vel(current_s_) * cruise_vel;
+
+    // Heading Correction (P-only is usually fine for Yaw)
+    double target_yaw = splines_["base_yaw"].get_pos(current_s_);
+    double yaw_err = target_yaw - current_yaw_;
+    while (yaw_err > M_PI) yaw_err -= 2.0 * M_PI;
+    while (yaw_err < -M_PI) yaw_err += 2.0 * M_PI;
+
+    double pos_error = std::hypot(target_x - current_base_x_, target_y - current_base_y_);
+    double abs_yaw_error = std::abs(yaw_err);
+    if (pos_error > MAX_POS_ERROR || abs_yaw_error > MAX_YAW_ERROR) {
+        RCLCPP_ERROR(get_logger(), "Failsafe Triggered! Tracking error too high.");
+        RCLCPP_ERROR(get_logger(), "Pos Error: %.3f m, Yaw Error: %.3f rad", pos_error, abs_yaw_error);
+        
+        // Stop all movement immediately
+        is_executing_ = false;
+        base_pub_->publish(geometry_msgs::msg::Twist());
+        
+        // Optional: Send a stop command to the arm here too
+        return;
+    }
+
+    // --- 2. PD GAINS (Tweak these for the HSR) ---
+    double kp = 2.0; 
+    double kd = 0.1;
+
+    // --- 3. CALCULATE CORRECTIONS (PD Logic) ---
+    // vx_world = Feedforward + Kp*(Pos Error) + Kd*(Vel Error)
+    double vx_world = target_vx + kp * (target_x - current_base_x_) + kd * (target_vx - current_vx_);
+    double vy_world = target_vy + kp * (target_y - current_base_y_) + kd * (target_vy - current_vy_);
+
+    // --- 4. ARM CONTROL ---
+    auto traj_msg = trajectory_msgs::msg::JointTrajectory();
+    traj_msg.joint_names = arm_joints_;
+    trajectory_msgs::msg::JointTrajectoryPoint pnt;
+    for (const auto& name : arm_joints_) {
+        pnt.positions.push_back(splines_[name].get_pos(current_s_));
+        pnt.velocities.push_back(splines_[name].get_vel(current_s_) * cruise_vel);
+    }
+    pnt.time_from_start = rclcpp::Duration::from_seconds(dt);
+    traj_msg.points.push_back(pnt);
+    arm_pub_->publish(traj_msg);
+
+    // --- 5. BASE PUBLISHING ---
+    geometry_msgs::msg::Twist twist;
+    twist.linear.x = vx_world * cos(current_yaw_) + vy_world * sin(current_yaw_);
+    twist.linear.y = -vx_world * sin(current_yaw_) + vy_world * cos(current_yaw_);
+    twist.angular.z = splines_["base_yaw"].get_vel(current_s_) * cruise_vel + (1.5 * yaw_err);
+    
+    base_pub_->publish(twist);
+}
+
+int main(int argc, char **argv) {
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<JointTrajectoryController>());
+    rclcpp::shutdown();
+    return 0;
+}
