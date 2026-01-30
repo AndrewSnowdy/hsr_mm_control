@@ -54,6 +54,7 @@ JointTrajectoryController::JointTrajectoryController() : Node("joint_trajectory_
         [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
             for (size_t i = 0; i < msg->name.size(); ++i) {
                 current_arm_positions_[msg->name[i]] = msg->position[i];
+                current_arm_velocities_[msg->name[i]] = msg->velocity[i];
             }
         }
     );
@@ -94,8 +95,6 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     double dy = (goal.count("base_y") ? goal["base_y"] : current_base_y_) - current_base_y_;
     double L = std::hypot(dx, dy);
 
-    // 2. The Distance Guard
-    // If the base isn't moving, we use a virtual distance of 1.0 so the arm can still move.
     total_path_length_ = (L < 0.01) ? 1.0 : L;
 
     // 3. Solve Splines using L as the "End Time"
@@ -105,8 +104,9 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
 
     for (const auto& name : arm_joints_) {
         double q0 = current_arm_positions_[name];
+        double v0 = current_arm_velocities_[name];
         double qf = goal.count(name) ? goal[name] : q0;
-        splines_[name].solve(q0, qf, 0, 0, 0, 0, total_path_length_);
+        splines_[name].solve(q0, qf, v0, 0, 0, 0, total_path_length_);
     }
 
     current_s_ = 0.0;

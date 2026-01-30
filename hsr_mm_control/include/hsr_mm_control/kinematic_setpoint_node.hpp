@@ -53,6 +53,12 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
+    rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr target_sub_;
+    geometry_msgs::msg::Point current_target_;
+    bool has_target_ = false;
+    geometry_msgs::msg::Point last_solved_target_;
+    const double TARGET_THRESHOLD = 0.01; // 1mm difference
+
     // State and Planning
     ControlState state_ = ControlState::IDLE;
     Eigen::VectorXd q_start_, q_goal_;

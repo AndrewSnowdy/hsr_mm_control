@@ -59,14 +59,14 @@
         </visual>
       </link>
     </model>
-
+<!-- 
     <include>
       <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/Table</uri>
       <name>table</name>
       <pose>2.5 0 0 0 0 1.5708</pose>
-    </include>
+    </include> -->
 
-    <model name="target_cube">
+    <!-- <model name="target_cube">
       <pose>2.2 0 1.041 0 0 0</pose>
       <link name="link">
         <inertial>
@@ -95,6 +95,38 @@
             <specular>0.5 0.5 0.5 1</specular>
           </material>
         </visual>
+      </link>
+    </model> -->
+
+    <model name="wall">
+      <static>true</static>
+      <pose>2.5 0 1.0 0 0 0</pose> <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.1 2.0 2.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.1 2.0 2.0</size></box></geometry>
+          <material>
+            <ambient>0.5 0.5 0.5 1</ambient>
+            <diffuse>0.7 0.7 0.7 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="ada_button">
+      <static>true</static>
+      <pose>2.44 0 1.0 0 0 0</pose> 
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.02 0.15 0.15</size></box></geometry>
+          <material>
+            <ambient>0 0 1 1</ambient> <diffuse>0 0 1 1</diffuse>
+          </material>
+        </visual>
+        <collision name="collision">
+          <geometry><box><size>0.02 0.15 0.15</size></box></geometry>
+        </collision>
       </link>
     </model>
 

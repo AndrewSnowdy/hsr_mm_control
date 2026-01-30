@@ -95,6 +95,18 @@ target_link_libraries(joint_trajectory_node
 )
 
 
+add_executable(mission_sequencer src/mission_sequencer.cpp)
+target_include_directories(mission_sequencer PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+ament_target_dependencies(mission_sequencer
+  rclcpp
+  geometry_msgs
+  sensor_msgs
+  nav_msgs
+  # Add tf2 if your sequencer is checking distances between frames
+)
+
 # ---- Install ----
 
 install(TARGETS
@@ -102,6 +114,7 @@ install(TARGETS
   dls
   kinematic_setpoint_node
   joint_trajectory_node
+  mission_sequencer
   DESTINATION lib/${PROJECT_NAME}
 )
 

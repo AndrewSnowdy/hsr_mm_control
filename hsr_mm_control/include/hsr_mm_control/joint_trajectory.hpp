@@ -46,6 +46,7 @@ private:
 
     // To store the real-time state of the robot
     std::map<std::string, double> current_arm_positions_;
+    std::map<std::string, double> current_arm_velocities_;
     double current_base_x_ = 0.0;
     double current_base_y_ = 0.0;
     double current_yaw_ = 0.0;

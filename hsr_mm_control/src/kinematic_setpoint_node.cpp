@@ -26,11 +26,15 @@ FinalPoseNode::FinalPoseNode()
   },
   model_ready_(false)
 {
-    // 1. Parameters (Same as before)
-    this->declare_parameter("target_x", 2.2);
-    // this->declare_parameter("target_y", 0.0);
-    this->declare_parameter("target_z", 1.04);
 
+    target_sub_ = this->create_subscription<geometry_msgs::msg::Point>(
+        "/waypoint_target", 10, 
+        [this](const geometry_msgs::msg::Point::SharedPtr msg) {
+            current_target_ = *msg;
+            has_target_ = true;
+            // Optional: Trigger the IK solve immediately when a new point arrives
+        }
+    );
 
     joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
     "/joint_states", 10, [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
@@ -136,34 +140,41 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
 }
 
 void FinalPoseNode::tick() {
-    if (!model_ready_ ) return;
-
-    if (!model_ready_ || !odom_received_ || !joints_received_ || !haveBaseState() || !haveArmState()) {
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
-            "Waiting: odom=%d joints=%d baseFinite=%d armComplete=%d",
-            (int)odom_received_, (int)joints_received_, (int)haveBaseState(), (int)haveArmState());
+    // Check if we are ready and have a target
+    if (!model_ready_ || !has_target_ || !odom_received_ || !joints_received_) {
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+                             "Solver Waiting: [Model: %d, Target: %d, Odom: %d, Joints: %d]",
+                             model_ready_, has_target_, odom_received_, joints_received_);
         return;
     }
 
-
-    if (state_ == ControlState::IDLE) {
-        Eigen::Vector3d cube_target(2.0, 0.0, 1.04);
-        Eigen::VectorXd result = solveGlobalIK(cube_target);
-
-        // CHECK 1: Did the solver return an empty vector (failure)?
-        // CHECK 2: Is it NaN?
-        if (result.size() > 0 && !result.array().isNaN().any()) {
-            q_goal_ = result;
-            state_ = ControlState::REACHED; 
-            RCLCPP_INFO(get_logger(), "Goal locked successfully.");
-        } else {
-            // If failed, wait and try again in the next tick
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "IK failed, retrying...");
-        }
+    // 2. Change Detection
+    // We only calculate distance if last_solved_target_ actually exists (q_goal size > 0)
+    double dist_change = 100.0; // Default high value to trigger first solve
+    if (q_goal_.size() > 0) {
+        dist_change = std::sqrt(
+            std::pow(current_target_.x - last_solved_target_.x, 2) +
+            std::pow(current_target_.y - last_solved_target_.y, 2) +
+            std::pow(current_target_.z - last_solved_target_.z, 2)
+        );
     }
 
-    // Only publish if we actually have a goal; otherwise, ghost = current robot
-    if (q_goal_.size() > 0) {
+    // 3. Conditional Execution
+    if (dist_change < TARGET_THRESHOLD && q_goal_.size() > 0) {
+        // Target hasn't moved. Just keep the ghost alive.
+        publishGhostPose(q_goal_);
+        return; 
+    }
+
+
+    // Map the Point message to the Eigen vector Pinocchio needs
+    Eigen::Vector3d target_vec(current_target_.x, current_target_.y, current_target_.z);
+
+    // Run your existing IK solver
+    Eigen::VectorXd result = solveGlobalIK(target_vec);
+
+    if (result.size() > 0 && !result.array().isNaN().any()) {
+        q_goal_ = result;
         publishGhostPose(q_goal_);
     }
 }
