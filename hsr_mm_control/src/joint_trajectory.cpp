@@ -85,28 +85,49 @@ void JointTrajectoryController::odom_callback(const nav_msgs::msg::Odometry::Sha
 }
 
 void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointState::SharedPtr msg) {
-    if (is_executing_) return;
-
     std::unordered_map<std::string, double> goal;
     for (size_t i = 0; i < msg->name.size(); ++i) goal[msg->name[i]] = msg->position[i];
 
-    // 1. Calculate Distance (L)
-    double dx = (goal.count("base_x") ? goal["base_x"] : current_base_x_) - current_base_x_;
-    double dy = (goal.count("base_y") ? goal["base_y"] : current_base_y_) - current_base_y_;
+    // 1. Calculate how much the TARGET coordinate moved from our last plan
+    double goal_drift = std::hypot(goal["base_x"] - last_goal_x_, goal["base_y"] - last_goal_y_);
+
+    // 2. THE FIX: If the goal coordinate is basically the same, don't start a new spline.
+    // This handles the case where is_executing_ is false but the sequencer is still 
+    // sending the same point.
+    if (goal_drift < 0.01) { 
+        return; 
+    }
+
+    // 3. Optional: Only interrupt a move if the new goal is significantly different
+    if (is_executing_ && goal_drift < 0.10) {
+        return;
+    }
+
+    // Now calculate the physical distance for the new spline
+    double dx = goal["base_x"] - current_base_x_;
+    double dy = goal["base_y"] - current_base_y_;
     double L = std::hypot(dx, dy);
 
-    total_path_length_ = (L < 0.01) ? 1.0 : L;
+    // Don't plan for microscopic distances
+    if (L < 0.01) return;
 
-    // 3. Solve Splines using L as the "End Time"
-    splines_["base_x"].solve(current_base_x_, goal["base_x"], 0, 0, 0, 0, total_path_length_);
-    splines_["base_y"].solve(current_base_y_, goal["base_y"], 0, 0, 0, 0, total_path_length_);
-    splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], 0, 0, 0, 0, total_path_length_);
+    RCLCPP_INFO(get_logger(), "!!! NEW TARGET !!! Dist: %.3f m", L);
+    
+    last_goal_x_ = goal["base_x"];
+    last_goal_y_ = goal["base_y"];
+    total_path_length_ = L;
+   
+
+    // Solve Splines using 1.0 as normalized time
+    splines_["base_x"].solve(current_base_x_, goal["base_x"], 0, 0, 0, 0, 1.0);
+    splines_["base_y"].solve(current_base_y_, goal["base_y"], 0, 0, 0, 0, 1.0);
+    splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], 0, 0, 0, 0, 1.0);
 
     for (const auto& name : arm_joints_) {
         double q0 = current_arm_positions_[name];
         double v0 = current_arm_velocities_[name];
         double qf = goal.count(name) ? goal[name] : q0;
-        splines_[name].solve(q0, qf, v0, 0, 0, 0, total_path_length_);
+        splines_[name].solve(q0, qf, v0, 0, 0, 0, 1.0);
     }
 
     current_s_ = 0.0;
@@ -118,30 +139,33 @@ void JointTrajectoryController::timer_callback() {
 
     // --- 1. PROGRESS TRACKING ---
     double dt = 0.02;
-    double cruise_vel = 0.03; // Speed in meters per second
+    double cruise_vel = 0.08; // Speed in meters per second
     const double MAX_POS_ERROR = 0.15; // 15 cm
     const double MAX_YAW_ERROR = 0.26; // ~15 degrees
     
     
     // Increment 's' instead of using clock 't'
     current_s_ += cruise_vel * dt;
+    double normalized_s = current_s_ / total_path_length_;
 
-    if (current_s_ >= total_path_length_) {
-        current_s_ = total_path_length_;
+    double progress_rate = cruise_vel / total_path_length_;
+
+    if (normalized_s >= 1.0) {
+        normalized_s = 1.0;
         is_executing_ = false;
         base_pub_->publish(geometry_msgs::msg::Twist());
         return;
     }
 
     // --- 1. SET TARGETS FROM SPLINE ---
-    double target_x = splines_["base_x"].get_pos(current_s_);
-    double target_vx = splines_["base_x"].get_vel(current_s_) * cruise_vel;
+    double target_x = splines_["base_x"].get_pos(normalized_s);
+    double target_vx = splines_["base_x"].get_vel(normalized_s) * cruise_vel;
 
-    double target_y = splines_["base_y"].get_pos(current_s_);
-    double target_vy = splines_["base_y"].get_vel(current_s_) * cruise_vel;
+    double target_y = splines_["base_y"].get_pos(normalized_s);
+    double target_vy = splines_["base_y"].get_vel(normalized_s) * cruise_vel;
 
     // Heading Correction (P-only is usually fine for Yaw)
-    double target_yaw = splines_["base_yaw"].get_pos(current_s_);
+    double target_yaw = splines_["base_yaw"].get_pos(normalized_s);
     double yaw_err = target_yaw - current_yaw_;
     while (yaw_err > M_PI) yaw_err -= 2.0 * M_PI;
     while (yaw_err < -M_PI) yaw_err += 2.0 * M_PI;
@@ -161,7 +185,7 @@ void JointTrajectoryController::timer_callback() {
     }
 
     // --- 2. PD GAINS (Tweak these for the HSR) ---
-    double kp = 2.0; 
+    double kp = 3.0; 
     double kd = 0.1;
 
     // --- 3. CALCULATE CORRECTIONS (PD Logic) ---
@@ -174,8 +198,8 @@ void JointTrajectoryController::timer_callback() {
     traj_msg.joint_names = arm_joints_;
     trajectory_msgs::msg::JointTrajectoryPoint pnt;
     for (const auto& name : arm_joints_) {
-        pnt.positions.push_back(splines_[name].get_pos(current_s_));
-        pnt.velocities.push_back(splines_[name].get_vel(current_s_) * cruise_vel);
+        pnt.positions.push_back(splines_[name].get_pos(normalized_s));
+        pnt.velocities.push_back(splines_[name].get_vel(normalized_s) * progress_rate);
     }
     pnt.time_from_start = rclcpp::Duration::from_seconds(dt);
     traj_msg.points.push_back(pnt);
@@ -185,7 +209,18 @@ void JointTrajectoryController::timer_callback() {
     geometry_msgs::msg::Twist twist;
     twist.linear.x = vx_world * cos(current_yaw_) + vy_world * sin(current_yaw_);
     twist.linear.y = -vx_world * sin(current_yaw_) + vy_world * cos(current_yaw_);
-    twist.angular.z = splines_["base_yaw"].get_vel(current_s_) * cruise_vel + (1.5 * yaw_err);
+    twist.angular.z = splines_["base_yaw"].get_vel(normalized_s) * progress_rate + (1.5 * yaw_err);
+
+    double speed_cmd = std::hypot(vx_world, vy_world);
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 250,
+        "--- TRAJECTORY STATUS ---");
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 250,
+        "Progress: %.1f%% | Dist left: %.3f m", (normalized_s * 100.0), (total_path_length_ - current_s_));
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 250,
+        "Target Vel: [%.3f, %.3f] | Total Cmd: %.3f m/s", target_vx, target_vy, speed_cmd);
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 250,
+        "Current Odom Vel: [%.3f, %.3f]", current_vx_, current_vy_);
     
     base_pub_->publish(twist);
 }

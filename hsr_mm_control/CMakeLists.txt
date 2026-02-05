@@ -104,6 +104,9 @@ ament_target_dependencies(mission_sequencer
   geometry_msgs
   sensor_msgs
   nav_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
   # Add tf2 if your sequencer is checking distances between frames
 )
 

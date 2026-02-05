@@ -2,102 +2,209 @@
 
 using namespace std::chrono_literals;
 
-MissionSequencer::MissionSequencer() : Node("mission_sequencer"), state_(MissionState::APPROACH) {
-    // Publisher to send the (X,Y,Z) target to the IK Solver
-    target_pub_ = this->create_publisher<geometry_msgs::msg::Point>("/waypoint_target", 10);
-    
-    // Subscriber to monitor where the robot actually is
-    odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        "/odom", 10, [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
-            current_x_ = msg->pose.pose.position.x;
-            current_y_ = msg->pose.pose.position.y;
-        });
 
-    timer_ = this->create_wall_timer(std::chrono::milliseconds(100), std::bind(&MissionSequencer::state_machine_timer, this));
-    
-    // Define our Hardcoded Button Location
-    button_x = 2.44; // From your Gazebo SDF
+MissionSequencer::MissionSequencer()
+: Node("mission_sequencer"),
+    simple_state_(SimpleState::APPROACH)
+{
+    mode_pub_ = this->create_publisher<std_msgs::msg::Bool>("/use_ik_mode", 10);
+    target_pub_ = this->create_publisher<geometry_msgs::msg::Pose>("/waypoint_target", 10);
+
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+    timer_ = this->create_wall_timer(100ms, std::bind(&MissionSequencer::simple_timer, this));
+
+    // Button location (odom frame)
+    button_x = 2.44;
     button_y = 0.0;
     button_z = 1.0;
+
+    RCLCPP_INFO(this->get_logger(), "MissionSequencer started (MINIMAL).");
 }
 
-bool MissionSequencer::wait_for(double seconds) {
-    if (!timer_started_) {
-        start_time_ = this->now();
-        timer_started_ = true;
+bool MissionSequencer::get_tf_xyz(const std::string& parent,
+                                  const std::string& child,
+                                  double &x, double &y, double &z)
+{
+  try {
+    auto tf = tf_buffer_->lookupTransform(parent, child, tf2::TimePointZero);
+    x = tf.transform.translation.x;
+    y = tf.transform.translation.y;
+    z = tf.transform.translation.z;
+    return std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+  } catch (const tf2::TransformException &ex) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                         "TF lookup failed (%s -> %s): %s",
+                         parent.c_str(), child.c_str(), ex.what());
+    return false;
+  }
+}
+
+bool MissionSequencer::get_base_yaw(double &yaw)
+{
+    try {
+        auto tf = tf_buffer_->lookupTransform(odom_frame_, base_frame_, tf2::TimePointZero);
+        tf2::Quaternion q(
+        tf.transform.rotation.x, tf.transform.rotation.y,
+        tf.transform.rotation.z, tf.transform.rotation.w);
+        
+        double r, p;
+        tf2::Matrix3x3(q).getRPY(r, p, yaw);
+        return true;
+    } catch (const tf2::TransformException &ex) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                            "Yaw lookup failed: %s", ex.what());
         return false;
     }
-
-    if ((this->now() - start_time_).seconds() >= seconds) {
-        timer_started_ = false; // Reset for next use
-        return true;
-    }
-    return false;
 }
 
-void MissionSequencer::state_machine_timer() {
-    geometry_msgs::msg::Point target_msg;
 
-    switch (state_) {
-        case MissionState::APPROACH:
-            // Waypoint 1: Move base close (0.8m away), arm tucked low (z=0.4)
-            target_msg.x = button_x - 0.8;
-            target_msg.y = button_y;
-            target_msg.z = 0.4; 
-            target_pub_->publish(target_msg);
+bool MissionSequencer::base_close_xyw(double tx, double ty, double tw, double tol_xy, double tol_w)
+{
+    double x, y, z, current_yaw;
 
-            if (is_at_goal(target_msg.x, target_msg.y, 0.05)) {
-                RCLCPP_INFO(this->get_logger(), "Arrived at APPROACH. Transitioning to READY.");
-                state_ = MissionState::READY;
+    // 1. Safe Lookups: If TF is lagging, we return false immediately
+    if (!get_tf_xyz(odom_frame_, base_frame_, x, y, z)) return false;
+    if (!get_base_yaw(current_yaw)) return false;
+
+    // 2. Calculate Translation Error
+    const double dist_err = std::hypot(tx - x, ty - y);
+
+    // 3. Calculate Orientation Error (Shortest Path)
+    double yaw_err = tw - current_yaw;
+    while (yaw_err > M_PI)  yaw_err -= 2.0 * M_PI;
+    while (yaw_err < -M_PI) yaw_err += 2.0 * M_PI;
+    yaw_err = std::abs(yaw_err);
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                        "BASE Tracking: DistErr=%.3fm, YawErr=%.3frad", dist_err, yaw_err);
+
+    // 4. Convergence Check
+    return (dist_err < tol_xy) && (yaw_err < tol_w);
+}
+
+bool MissionSequencer::ee_close_xyz(double tx, double ty, double tz, double tol_xyz)
+{
+    double x, y, z;
+    if (!get_tf_xyz(odom_frame_, ee_frame_, x, y, z)) return false;
+    const double dx = tx - x, dy = ty - y, dz = tz - z;
+    const double err = std::sqrt(dx*dx + dy*dy + dz*dz);
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                        "EE err=%.3f (tol=%.3f) ee=[%.2f %.2f %.2f]",
+                        err, tol_xyz, x, y, z);
+    return err < tol_xyz;
+}
+
+void MissionSequencer::simple_timer()
+{
+    geometry_msgs::msg::Pose target_pose;
+    std_msgs::msg::Bool mode_msg;
+
+    auto set_yaw = [](geometry_msgs::msg::Pose &pose, double yaw) {
+        tf2::Quaternion q;
+        q.setRPY(0, 0, yaw);
+        pose.orientation.x = q.x();
+        pose.orientation.y = q.y();
+        pose.orientation.z = q.z();
+        pose.orientation.w = q.w();
+    };
+
+
+    switch (simple_state_) {
+        case SimpleState::APPROACH: {
+            mode_msg.data = false;               // base mode
+            mode_pub_->publish(mode_msg);
+
+            // Drive near the button
+            target_pose.position.x = button_x - 1.5;
+            target_pose.position.y = button_y;
+            //   target_pose.position.z = 0.4; //does not matter because in base mode
+            double target_yaw = 0.0; 
+            set_yaw(target_pose, target_yaw);
+            target_pub_->publish(target_pose);
+
+            // Use a forgiving tolerance first
+            if (base_close_xyw(target_pose.position.x, target_pose.position.y, target_yaw, 0.05, 0.1)) {
+                simple_state_ = SimpleState::PRESS;
+                RCLCPP_INFO(this->get_logger(), "APPROACH -> PREASS");
             }
             break;
+        }
 
-        case MissionState::READY:
-            // Waypoint 2: Arm out to button height, 10cm away
-            target_msg.x = button_x - 0.1;
-            target_msg.y = button_y;
-            target_msg.z = button_z;
-            target_pub_->publish(target_msg);
+        case SimpleState::PRESS: {
+            mode_msg.data = true;                // IK mode
+            mode_pub_->publish(mode_msg);
 
-            // Here we check if the arm is extended (You can add joint check later)
-            // For now, let's wait 3 seconds to ensure the spline finishes
-            if (wait_for(3.0)) state_ = MissionState::PRESS;
+            // Just go to the press goal directly
+            target_pose.position.x = button_x - 0.08;
+            target_pose.position.y = button_y;
+            target_pose.position.z = button_z - 0.02;
+            set_yaw(target_pose, 0.75);
+            target_pub_->publish(target_pose);
+
+            // Use something realistic (1–3cm)
+            if (ee_close_xyz(target_pose.position.x, target_pose.position.y, target_pose.position.z, /*tol_xyz=*/0.02)) {
+                simple_state_ = SimpleState::RETRACT;
+                RCLCPP_INFO(this->get_logger(), "PRESS -> RETRACT");
+            }
             break;
+        }
 
-        case MissionState::PRESS:
-            // Waypoint 3: The "Dumb Push" - 2cm past the button surface
-            target_msg.x = button_x + 0.02;
-            target_msg.y = button_y;
-            target_msg.z = button_z;
-            target_pub_->publish(target_msg);
+        case SimpleState::RETRACT: {
+            mode_msg.data = false; // Keep IK mode for precise arm movement
+            mode_pub_->publish(mode_msg);
 
-            if (wait_for(2.0)) state_ = MissionState::RETRACT;
-            break;
+            // Back away from the button (move back 30cm and slightly up)
+            target_pose.position.x = button_x - 0.80; 
+            target_pose.position.y = button_y;
+            target_pose.position.z = button_z + 0.10; 
+            double target_yaw = 1.57; 
+            set_yaw(target_pose, target_yaw);
+            target_pub_->publish(target_pose);
 
-        case MissionState::RETRACT:
-            // Final Waypoint: Pull back and tuck
-            target_msg.x = button_x - 0.5;
-            target_msg.y = button_y;
-            target_msg.z = 0.5;
-            target_pub_->publish(target_msg);
-            state_ = MissionState::DONE;
+            // Check if we've backed away enough
+            if (base_close_xyw(target_pose.position.x, target_pose.position.y, target_yaw, 0.05, 0.1)) {
+                simple_state_ = SimpleState::EXIT;
+                RCLCPP_INFO(this->get_logger(), "RETRACT -> EXIT");
+            }
             break;
-            
-        case MissionState::DONE:
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Sequence Finished.");
+        }
+        case SimpleState::EXIT: {
+            mode_msg.data = false; 
+            mode_pub_->publish(mode_msg);
+
+            // Waypoint: Drive to the center of the gap
+            // Side wall tip is at X=0.5, Front wall is at X=2.5. Midpoint X = 1.5.
+            // Move Y to 2.0 to clear the hallway
+            double tx = 1.5; 
+            double ty = 2.5; 
+            double tw = 1.5708; // Face "North" (toward the gap)
+
+            target_pose.position.x = tx;
+            target_pose.position.y = ty;
+            set_yaw(target_pose, tw);
+            target_pub_->publish(target_pose);
+
+            if (base_close_xyw(tx, ty, tw, 0.15, 0.2)) {
+                simple_state_ = SimpleState::DONE;
+                RCLCPP_INFO(this->get_logger(), "EXIT -> DONE (Gap cleared)");
+            }
             break;
+        }
+
+        case SimpleState::DONE: {
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                "DONE (holding).");
+            break;
+        }
     }
-}
-
-bool MissionSequencer::is_at_goal(double tx, double ty, double tol) {
-    return std::hypot(tx - current_x_, ty - current_y_) < tol;
 }
 
 int main(int argc, char ** argv)
 {
-  rclcpp::init(argc, argv);
-  auto node = std::make_shared<MissionSequencer>();
-  rclcpp::spin(node);
-  rclcpp::shutdown();
-  return 0;
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<MissionSequencer>());
+    rclcpp::shutdown();
+    return 0;
 }

@@ -55,6 +55,8 @@ private:
     double current_vy_ = 0.0;
     double current_vw_ = 0.0;
 
+    double last_goal_x_ = 0.0;
+    double last_goal_y_ = 0.0;
     double current_s_;
     double total_path_length_;
     double final_goal_yaw_;

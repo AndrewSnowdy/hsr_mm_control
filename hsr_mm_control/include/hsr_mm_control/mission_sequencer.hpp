@@ -1,39 +1,57 @@
-#ifndef MISSION_SEQUENCER_HPP
-#define MISSION_SEQUENCER_HPP
+#pragma once
 
 #include <rclcpp/rclcpp.hpp>
-#include <geometry_msgs/msg/point.hpp>
-#include <nav_msgs/msg/odometry.hpp>
-#include <chrono>
+#include <std_msgs/msg/bool.hpp>
+#include <geometry_msgs/msg/pose.hpp>
 
-enum class MissionState { IDLE, APPROACH, READY, PRESS, RETRACT, DONE };
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+
+#include <cmath>
+#include <memory>
+
+// Minimal states
+enum class SimpleState { APPROACH, PRESS, DONE, EXIT, RETRACT};
 
 class MissionSequencer : public rclcpp::Node {
 public:
     MissionSequencer();
 
 private:
-    // Main Logic
-    void state_machine_timer();
-    bool is_at_goal(double tx, double ty, double tol);
-    bool wait_for(double seconds);
+    void simple_timer();
 
-    // ROS 2 Infrastructure
-    rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr target_pub_;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+    // --- TF helpers ---
+    bool get_tf_xyz(const std::string& parent,
+                    const std::string& child,
+                    double &x, double &y, double &z);
+    bool get_base_yaw(double &yaw);
+
+    bool base_close_xyw(double tx, double ty, double tw, double tol_xy, double tol_w);
+    bool ee_close_xyz(double tx, double ty, double tz, double tol_xyz);
+
+private:
+    // --- state ---
+    SimpleState simple_state_{SimpleState::APPROACH};
+
+    // --- pubs ---
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mode_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::Pose>::SharedPtr target_pub_;
+
+    // --- timer ---
     rclcpp::TimerBase::SharedPtr timer_;
 
-    // State & Data
-    MissionState state_;
-    double current_x_{0.0};
-    double current_y_{0.0};
-    
-    // Hardcoded Targets
-    double button_x, button_y, button_z;
+    // --- TF ---
+    std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
-    // Timing helper
-    rclcpp::Time start_time_;
-    bool timer_started_{false};
+    // --- button location ---
+    double button_x{2.44};
+    double button_y{0.0};
+    double button_z{1.0};
+
+    // --- frame names ---
+    std::string odom_frame_{"odom"};
+    std::string base_frame_{"base_link"};
+    std::string ee_frame_{"hand_palm_link"};
 };
-
-#endif

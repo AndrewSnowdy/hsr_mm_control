@@ -13,26 +13,35 @@ using namespace std::chrono_literals;
 
 FinalPoseNode::FinalPoseNode()
 : Node("final_pose_node"),
-  state_(ControlState::IDLE),
-  base_pos_x_(0.0),
-  base_pos_y_(0.0),
-  base_yaw_(0.0),  
-  arm_joint_names_{ 
+  use_ik_mode_(false),
+  model_ready_(false),      
+  arm_joint_names_{        
     "arm_lift_joint",
     "arm_flex_joint",
     "arm_roll_joint",
     "wrist_flex_joint",
     "wrist_roll_joint"
   },
-  model_ready_(false)
+  base_pos_x_(0.0),
+  base_pos_y_(0.0),
+  base_yaw_(0.0)
 {
 
-    target_sub_ = this->create_subscription<geometry_msgs::msg::Point>(
+    target_sub_ = this->create_subscription<geometry_msgs::msg::Pose>(
         "/waypoint_target", 10, 
-        [this](const geometry_msgs::msg::Point::SharedPtr msg) {
+        [this](const geometry_msgs::msg::Pose::SharedPtr msg) {
             current_target_ = *msg;
             has_target_ = true;
             // Optional: Trigger the IK solve immediately when a new point arrives
+        }
+    );
+
+    mode_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+        "/use_ik_mode", 10, 
+        [this](const std_msgs::msg::Bool::SharedPtr msg) {
+            use_ik_mode_ = msg->data;
+            // RCLCPP_INFO(this->get_logger(), "Mode Switched: %s", 
+            //             use_ik_mode_ ? "IK MANIPULATION" : "TUCKED NAVIGATION");
         }
     );
 
@@ -74,14 +83,21 @@ FinalPoseNode::FinalPoseNode()
 
 Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
 {
-    // Warm start: MUST be real state (don’t leave it as neutral)
-    Eigen::VectorXd q = pinocchio::neutral(model_);
+    tf2::Quaternion q_target_tf(
+        current_target_.orientation.x,
+        current_target_.orientation.y,
+        current_target_.orientation.z,
+        current_target_.orientation.w);
+    double r, p, target_yaw;
+    tf2::Matrix3x3(q_target_tf).getRPY(r, p, target_yaw);
 
-    // planar: [x, y, cos(yaw), sin(yaw)]
+
+    // Warm start
+    Eigen::VectorXd q = pinocchio::neutral(model_);
     q[0] = base_pos_x_;
     q[1] = base_pos_y_;
-    q[2] = std::cos(base_yaw_);
-    q[3] = std::sin(base_yaw_);
+    q[2] = std::cos(target_yaw);
+    q[3] = std::sin(target_yaw);
 
     for (const auto& kv : q_map_) {
         if (!joint_name_to_id_.count(kv.first)) continue;
@@ -91,7 +107,7 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
     }
 
     const double damping = 0.1;
-    const double step_size = 0.1;
+    const double step_size = 0.5;
     const int max_iters = 500;
     pinocchio::Data data(model_);
 
@@ -120,6 +136,8 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
                                     
         if (!J.array().isFinite().all()) return Eigen::VectorXd();;
 
+        J.col(2).setZero();
+
         Eigen::MatrixXd Jt = J.topRows<3>();           // 3 x nv
         Eigen::Matrix3d A  = Jt * Jt.transpose();      // 3 x 3
         A.diagonal().array() += damping * damping;
@@ -130,6 +148,13 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
         if (!dq.array().isFinite().all()) return Eigen::VectorXd();;
  
         q = pinocchio::integrate(model_, q, dq * step_size);
+
+        q[2] = std::cos(target_yaw);
+        q[3] = std::sin(target_yaw);
+
+        for (int j = 0; j < model_.nq; ++j) {
+            q[j] = std::max(model_.lowerPositionLimit[j], std::min(model_.upperPositionLimit[j], q[j]));
+        }
 
         if (!q.allFinite()) return Eigen::VectorXd();;
 
@@ -148,34 +173,68 @@ void FinalPoseNode::tick() {
         return;
     }
 
-    // 2. Change Detection
-    // We only calculate distance if last_solved_target_ actually exists (q_goal size > 0)
-    double dist_change = 100.0; // Default high value to trigger first solve
-    if (q_goal_.size() > 0) {
-        dist_change = std::sqrt(
-            std::pow(current_target_.x - last_solved_target_.x, 2) +
-            std::pow(current_target_.y - last_solved_target_.y, 2) +
-            std::pow(current_target_.z - last_solved_target_.z, 2)
-        );
-    }
+    tf2::Quaternion q_tf(
+        current_target_.orientation.x,
+        current_target_.orientation.y,
+        current_target_.orientation.z,
+        current_target_.orientation.w);
+    double r, p, target_yaw;
+    tf2::Matrix3x3(q_tf).getRPY(r, p, target_yaw);  
 
-    // 3. Conditional Execution
-    if (dist_change < TARGET_THRESHOLD && q_goal_.size() > 0) {
-        // Target hasn't moved. Just keep the ghost alive.
+    double dist_to_waypoint = std::hypot(current_target_.position.x - base_pos_x_, 
+                                          current_target_.position.y - base_pos_y_);
+
+    if (!use_ik_mode_) {
+        // --- MODE: TUCKED NAVIGATION ---
+        // Create a neutral configuration based on the model
+        Eigen::VectorXd q_tucked = pinocchio::neutral(model_);
+
+        // Position base at the waypoint target
+        q_tucked[0] = current_target_.position.x;
+        q_tucked[1] = current_target_.position.y;
+        q_tucked[2] = std::cos(target_yaw);; // cos(yaw) - looking straight
+        q_tucked[3] = std::sin(target_yaw);; // sin(yaw)
+
+        // Set arm joints to a safe "Tucked" pose (Neutral)
+        // Using your precomputed map to find the correct indices
+        if (arm_name_to_qidx_.count("arm_lift_joint")) 
+            q_tucked[arm_name_to_qidx_["arm_lift_joint"]] = 0.01; // 5cm up from floor
+        if (arm_name_to_qidx_.count("arm_flex_joint")) 
+            q_tucked[arm_name_to_qidx_["arm_flex_joint"]] = -0.01; // Slightly back
+
+        q_goal_ = q_tucked;
         publishGhostPose(q_goal_);
-        return; 
-    }
 
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+                             "Approach Mode: Dist=%.2f. Arm is Tucked.", dist_to_waypoint);
+    } 
+    else {
+        // --- MODE: IK MANIPULATION ---
+        // Only run the solver when close enough to reach naturally
+        
+        // Use your Change Detection logic here to save CPU
+        double dist_change = 100.0;
+        if (q_goal_.size() > 0) {
+            dist_change = std::sqrt(
+                std::pow(current_target_.position.x - last_solved_target_.position.x, 2) +
+                std::pow(current_target_.position.y - last_solved_target_.position.y, 2) +
+                std::pow(current_target_.position.z - last_solved_target_.position.z, 2)
+            );
+        }
 
-    // Map the Point message to the Eigen vector Pinocchio needs
-    Eigen::Vector3d target_vec(current_target_.x, current_target_.y, current_target_.z);
+        if (dist_change < TARGET_THRESHOLD && q_goal_.size() > 0) {
+            publishGhostPose(q_goal_);
+            return; 
+        }
 
-    // Run your existing IK solver
-    Eigen::VectorXd result = solveGlobalIK(target_vec);
+        Eigen::Vector3d target_vec(current_target_.position.x, current_target_.position.y, current_target_.position.z);
+        Eigen::VectorXd result = solveGlobalIK(target_vec);
 
-    if (result.size() > 0 && !result.array().isNaN().any()) {
-        q_goal_ = result;
-        publishGhostPose(q_goal_);
+        if (result.size() > 0 && !result.array().isNaN().any()) {
+            q_goal_ = result;
+            last_solved_target_ = current_target_;
+            publishGhostPose(q_goal_);
+        }
     }
 }
 
