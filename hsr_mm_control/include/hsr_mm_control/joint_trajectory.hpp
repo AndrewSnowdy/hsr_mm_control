@@ -61,6 +61,10 @@ private:
     double total_path_length_;
     double final_goal_yaw_;
 
+    rclcpp::Time last_t_{0, 0, RCL_ROS_TIME};
+    double total_expected_time_;
+    double current_time_s_;
+
     std::map<std::string, QuinticSpline> splines_;
     std::vector<std::string> arm_joints_;
     rclcpp::Time start_time_;

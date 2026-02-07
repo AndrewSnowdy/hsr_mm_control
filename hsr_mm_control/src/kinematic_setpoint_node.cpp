@@ -189,6 +189,7 @@ void FinalPoseNode::tick() {
         // Create a neutral configuration based on the model
         Eigen::VectorXd q_tucked = pinocchio::neutral(model_);
 
+
         // Position base at the waypoint target
         q_tucked[0] = current_target_.position.x;
         q_tucked[1] = current_target_.position.y;
@@ -211,6 +212,9 @@ void FinalPoseNode::tick() {
     else {
         // --- MODE: IK MANIPULATION ---
         // Only run the solver when close enough to reach naturally
+        Eigen::VectorXd q_nominal = pinocchio::neutral(model_);
+        if (arm_name_to_qidx_.count("arm_lift_joint")) 
+            q_nominal[arm_name_to_qidx_["arm_lift_joint"]] = 1.0;
         
         // Use your Change Detection logic here to save CPU
         double dist_change = 100.0;

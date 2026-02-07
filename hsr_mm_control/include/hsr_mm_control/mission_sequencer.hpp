@@ -12,7 +12,7 @@
 #include <memory>
 
 // Minimal states
-enum class SimpleState { APPROACH, PRESS, DONE, EXIT, RETRACT};
+enum class SimpleState { APPROACH, PRE_PRESS, PRESS, DONE, EXIT, RETRACT};
 
 class MissionSequencer : public rclcpp::Node {
 public:

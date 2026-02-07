@@ -88,139 +88,128 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     std::unordered_map<std::string, double> goal;
     for (size_t i = 0; i < msg->name.size(); ++i) goal[msg->name[i]] = msg->position[i];
 
-    // 1. Calculate how much the TARGET coordinate moved from our last plan
     double goal_drift = std::hypot(goal["base_x"] - last_goal_x_, goal["base_y"] - last_goal_y_);
+    if (goal_drift < 0.01) return;
+    if (is_executing_ && goal_drift < 0.10) return;
 
-    // 2. THE FIX: If the goal coordinate is basically the same, don't start a new spline.
-    // This handles the case where is_executing_ is false but the sequencer is still 
-    // sending the same point.
-    if (goal_drift < 0.01) { 
-        return; 
-    }
-
-    // 3. Optional: Only interrupt a move if the new goal is significantly different
-    if (is_executing_ && goal_drift < 0.10) {
-        return;
-    }
-
-    // Now calculate the physical distance for the new spline
     double dx = goal["base_x"] - current_base_x_;
     double dy = goal["base_y"] - current_base_y_;
     double L = std::hypot(dx, dy);
 
-    // Don't plan for microscopic distances
     if (L < 0.01) return;
 
-    RCLCPP_INFO(get_logger(), "!!! NEW TARGET !!! Dist: %.3f m", L);
+    // --- DYNAMIC TIME CALCULATION ---
+    double desired_cruise_vel = 0.125; // Target speed in m/s
+    // Time = Distance / Speed. We cap it at 0.5s minimum to prevent infinite acceleration
+    double T_dynamic = std::max(L / desired_cruise_vel, 3.5); 
+    
+    RCLCPP_INFO(get_logger(), "!!! NEW TARGET !!! Dist: %.3f m | Durati.on: %.2f s", L, T_dynamic);
     
     last_goal_x_ = goal["base_x"];
     last_goal_y_ = goal["base_y"];
-    total_path_length_ = L;
-   
+    total_expected_time_ = T_dynamic; // Make sure this is declared in your header
 
-    // Solve Splines using 1.0 as normalized time
-    splines_["base_x"].solve(current_base_x_, goal["base_x"], 0, 0, 0, 0, 1.0);
-    splines_["base_y"].solve(current_base_y_, goal["base_y"], 0, 0, 0, 0, 1.0);
-    splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], 0, 0, 0, 0, 1.0);
+    // Solve Splines using actual time T_dynamic
+    // This makes get_vel() return ACTUAL m/s
+    splines_["base_x"].solve(current_base_x_, goal["base_x"], 0, 0, 0, 0, T_dynamic);
+    splines_["base_y"].solve(current_base_y_, goal["base_y"], 0, 0, 0, 0, T_dynamic);
+    splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], 0, 0, 0, 0, T_dynamic);
 
     for (const auto& name : arm_joints_) {
         double q0 = current_arm_positions_[name];
-        double v0 = current_arm_velocities_[name];
         double qf = goal.count(name) ? goal[name] : q0;
-        splines_[name].solve(q0, qf, v0, 0, 0, 0, 1.0);
+        // Sync arm to base by using the same T_dynamic
+        splines_[name].solve(q0, qf, 0, 0, 0, 0, T_dynamic);
     }
 
-    current_s_ = 0.0;
+    last_t_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type()); // Reset timer
+    current_time_s_ = 0.0;
+    is_executing_ = true;
     is_executing_ = true;
 }
 
 void JointTrajectoryController::timer_callback() {
     if (!is_executing_) return;
 
-    // --- 1. PROGRESS TRACKING ---
-    double dt = 0.02;
-    double cruise_vel = 0.08; // Speed in meters per second
-    const double MAX_POS_ERROR = 0.15; // 15 cm
-    const double MAX_YAW_ERROR = 0.26; // ~15 degrees
-    
-    
-    // Increment 's' instead of using clock 't'
-    current_s_ += cruise_vel * dt;
-    double normalized_s = current_s_ / total_path_length_;
+    auto now = this->now();
+    if (last_t_.nanoseconds() == 0) { 
+        last_t_ = now; 
+        return; // Skip the first tick to get a valid delta next time
+    }
 
-    double progress_rate = cruise_vel / total_path_length_;
+    double dt = (now - last_t_).seconds();
+    last_t_ = now;
+    dt = std::clamp(dt, 0.0, 0.05);
 
-    if (normalized_s >= 1.0) {
-        normalized_s = 1.0;
+    current_time_s_ += dt;
+
+    // Check for completion based on time
+    if (current_time_s_ >= total_expected_time_) {
         is_executing_ = false;
         base_pub_->publish(geometry_msgs::msg::Twist());
         return;
     }
 
-    // --- 1. SET TARGETS FROM SPLINE ---
-    double target_x = splines_["base_x"].get_pos(normalized_s);
-    double target_vx = splines_["base_x"].get_vel(normalized_s) * cruise_vel;
+    // --- SET TARGETS DIRECTLY FROM SPLINE ---
+    // target_vx and target_vy are now in m/s directly
+    double target_x  = splines_["base_x"].get_pos(current_time_s_);
+    double target_vx = splines_["base_x"].get_vel(current_time_s_);
 
-    double target_y = splines_["base_y"].get_pos(normalized_s);
-    double target_vy = splines_["base_y"].get_vel(normalized_s) * cruise_vel;
+    double target_y  = splines_["base_y"].get_pos(current_time_s_);
+    double target_vy = splines_["base_y"].get_vel(current_time_s_);
 
-    // Heading Correction (P-only is usually fine for Yaw)
-    double target_yaw = splines_["base_yaw"].get_pos(normalized_s);
+    double target_yaw = splines_["base_yaw"].get_pos(current_time_s_);
+    double target_vw  = splines_["base_yaw"].get_vel(current_time_s_);
+
+    // PD Error Calculation
     double yaw_err = target_yaw - current_yaw_;
     while (yaw_err > M_PI) yaw_err -= 2.0 * M_PI;
     while (yaw_err < -M_PI) yaw_err += 2.0 * M_PI;
 
+    // Failsafe
     double pos_error = std::hypot(target_x - current_base_x_, target_y - current_base_y_);
-    double abs_yaw_error = std::abs(yaw_err);
-    if (pos_error > MAX_POS_ERROR || abs_yaw_error > MAX_YAW_ERROR) {
-        RCLCPP_ERROR(get_logger(), "Failsafe Triggered! Tracking error too high.");
-        RCLCPP_ERROR(get_logger(), "Pos Error: %.3f m, Yaw Error: %.3f rad", pos_error, abs_yaw_error);
-        
-        // Stop all movement immediately
-        is_executing_ = false;
+    if (pos_error > 0.05 || std::abs(yaw_err) > 0.26) {
+        RCLCPP_FATAL(get_logger(), "!!! CRITICAL SAFETY VIOLATION !!!");
+        RCLCPP_FATAL(get_logger(), "Pos Error: %.3fm | Yaw Error: %.3frad", pos_error, std::abs(yaw_err));
         base_pub_->publish(geometry_msgs::msg::Twist());
-        
-        // Optional: Send a stop command to the arm here too
+        rclcpp::shutdown();
         return;
     }
 
-    // --- 2. PD GAINS (Tweak these for the HSR) ---
-    double kp = 3.0; 
-    double kd = 0.1;
+    
 
-    // --- 3. CALCULATE CORRECTIONS (PD Logic) ---
-    // vx_world = Feedforward + Kp*(Pos Error) + Kd*(Vel Error)
-    double vx_world = target_vx + kp * (target_x - current_base_x_) + kd * (target_vx - current_vx_);
-    double vy_world = target_vy + kp * (target_y - current_base_y_) + kd * (target_vy - current_vy_);
+    // PD Controller (Gains: kp=3.0, kd=0.1)
+    double vx_world = target_vx + 3.0 * (target_x - current_base_x_) + 0.1 * (target_vx - current_vx_);
+    double vy_world = target_vy + 3.0 * (target_y - current_base_y_) + 0.1 * (target_vy - current_vy_);
 
-    // --- 4. ARM CONTROL ---
+    const double MAX_VEL = 0.28; // m/s
+    double current_speed = std::hypot(vx_world, vy_world);
+
+    // Failsafe
+    if (current_speed > MAX_VEL) {
+        RCLCPP_FATAL(get_logger(), "Velocity Command Unsafe: %.3f m/s. Killing Node.", current_speed);
+        base_pub_->publish(geometry_msgs::msg::Twist());
+        rclcpp::shutdown();
+        return;
+    }
+
+    // --- ARM CONTROL (Synchronized) ---
     auto traj_msg = trajectory_msgs::msg::JointTrajectory();
     traj_msg.joint_names = arm_joints_;
     trajectory_msgs::msg::JointTrajectoryPoint pnt;
     for (const auto& name : arm_joints_) {
-        pnt.positions.push_back(splines_[name].get_pos(normalized_s));
-        pnt.velocities.push_back(splines_[name].get_vel(normalized_s) * progress_rate);
+        pnt.positions.push_back(splines_[name].get_pos(current_time_s_));
+        pnt.velocities.push_back(splines_[name].get_vel(current_time_s_)); // Pure rad/s
     }
     pnt.time_from_start = rclcpp::Duration::from_seconds(dt);
     traj_msg.points.push_back(pnt);
     arm_pub_->publish(traj_msg);
 
-    // --- 5. BASE PUBLISHING ---
+    // --- BASE PUBLISHING ---
     geometry_msgs::msg::Twist twist;
     twist.linear.x = vx_world * cos(current_yaw_) + vy_world * sin(current_yaw_);
     twist.linear.y = -vx_world * sin(current_yaw_) + vy_world * cos(current_yaw_);
-    twist.angular.z = splines_["base_yaw"].get_vel(normalized_s) * progress_rate + (1.5 * yaw_err);
-
-    double speed_cmd = std::hypot(vx_world, vy_world);
-
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 250,
-        "--- TRAJECTORY STATUS ---");
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 250,
-        "Progress: %.1f%% | Dist left: %.3f m", (normalized_s * 100.0), (total_path_length_ - current_s_));
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 250,
-        "Target Vel: [%.3f, %.3f] | Total Cmd: %.3f m/s", target_vx, target_vy, speed_cmd);
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 250,
-        "Current Odom Vel: [%.3f, %.3f]", current_vx_, current_vy_);
+    twist.angular.z = target_vw + (1.5 * yaw_err);
     
     base_pub_->publish(twist);
 }

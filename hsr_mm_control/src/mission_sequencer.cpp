@@ -126,8 +126,26 @@ void MissionSequencer::simple_timer()
 
             // Use a forgiving tolerance first
             if (base_close_xyw(target_pose.position.x, target_pose.position.y, target_yaw, 0.05, 0.1)) {
+                simple_state_ = SimpleState::PRE_PRESS;
+                RCLCPP_INFO(this->get_logger(), "APPROACH -> PRE_PRESS");
+            }
+            break;
+        }
+        case SimpleState::PRE_PRESS: {
+            mode_msg.data = true; // Switch to IK mode
+            mode_pub_->publish(mode_msg);
+
+            // Move EE to a "Standoff" position 10cm away from the button
+            target_pose.position.x = button_x - 0.15; 
+            target_pose.position.y = button_y;
+            target_pose.position.z = button_z;
+            set_yaw(target_pose, 0.0);
+            target_pub_->publish(target_pose);
+
+            // Wait for high precision before the final push
+            if (ee_close_xyz(target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.02)) {
                 simple_state_ = SimpleState::PRESS;
-                RCLCPP_INFO(this->get_logger(), "APPROACH -> PREASS");
+                RCLCPP_INFO(this->get_logger(), "PRE_PRESS -> PRESS");
             }
             break;
         }
@@ -140,7 +158,7 @@ void MissionSequencer::simple_timer()
             target_pose.position.x = button_x - 0.08;
             target_pose.position.y = button_y;
             target_pose.position.z = button_z - 0.02;
-            set_yaw(target_pose, 0.75);
+            set_yaw(target_pose, 0.0);
             target_pub_->publish(target_pose);
 
             // Use something realistic (1–3cm)
@@ -178,7 +196,7 @@ void MissionSequencer::simple_timer()
             // Side wall tip is at X=0.5, Front wall is at X=2.5. Midpoint X = 1.5.
             // Move Y to 2.0 to clear the hallway
             double tx = 1.5; 
-            double ty = 2.5; 
+            double ty = 1.5; 
             double tw = 1.5708; // Face "North" (toward the gap)
 
             target_pose.position.x = tx;
