@@ -72,4 +72,5 @@ private:
     double duration_ = 10.0;
     const double lookahead = 0.20; 
 
+    int arm_pub_counter_ = 0;
 };

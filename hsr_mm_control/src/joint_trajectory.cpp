@@ -90,43 +90,53 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     std::unordered_map<std::string, double> goal;
     for (size_t i = 0; i < msg->name.size(); ++i) goal[msg->name[i]] = msg->position[i];
 
+    // 1. Check for Goal Drift
     double goal_drift = std::hypot(goal["base_x"] - last_goal_x_, goal["base_y"] - last_goal_y_);
     if (goal_drift < 0.01) return;
     if (is_executing_ && goal_drift < 0.10) return;
 
+    // 2. Calculate Base Requirements
     double dx = goal["base_x"] - current_base_x_;
     double dy = goal["base_y"] - current_base_y_;
     double L = std::hypot(dx, dy);
 
-    if (L < 0.01) return;
+    // 3. NEW: Calculate Arm Requirements
+    double max_arm_delta = 0.0;
+    for (const auto& name : arm_joints_) {
+        double delta = std::abs(goal[name] - current_arm_positions_[name]);
+        if (delta > max_arm_delta) max_arm_delta = delta;
+    }
 
-    // --- DYNAMIC TIME CALCULATION ---
-    double desired_cruise_vel = 0.1; // Target speed in m/s
-    // Time = Distance / Speed. We cap it at 0.5s minimum to prevent infinite acceleration
-    double T_dynamic = std::max(L / desired_cruise_vel, 3.5); 
+    // 4. DYNAMIC TIME CALCULATION (Bottleneck-based)
+    double base_time = L / 0.1;            // Assume 0.15 m/s cruise
+    double arm_time  = max_arm_delta / 0.1; // Assume 0.2 rad/s cruise
+
+    // Take the slowest component as the master clock, but keep a floor for smoothness
+    double T_dynamic = std::max({base_time, arm_time, 2.5}); 
     
-    RCLCPP_INFO(get_logger(), "!!! NEW TARGET !!! Dist: %.3f m | Durati.on: %.2f s", L, T_dynamic);
+    RCLCPP_INFO(get_logger(), "!!! NEW TARGET !!! Base Dist: %.3f m | Arm Move: %.3f rad | Time: %.2f s", 
+                L, max_arm_delta, T_dynamic);
     
     last_goal_x_ = goal["base_x"];
     last_goal_y_ = goal["base_y"];
-    total_expected_time_ = T_dynamic; // Make sure this is declared in your header
+    total_expected_time_ = T_dynamic;
 
-    // Solve Splines using actual time T_dynamic
-    // This makes get_vel() return ACTUAL m/s
-    splines_["base_x"].solve(current_base_x_, goal["base_x"], 0, 0, 0, 0, T_dynamic);
-    splines_["base_y"].solve(current_base_y_, goal["base_y"], 0, 0, 0, 0, T_dynamic);
-    splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], 0, 0, 0, 0, T_dynamic);
+    // 5. Solve Splines (Base)
+    splines_["base_x"].solve(current_base_x_, goal["base_x"], current_vx_, 0, 0, 0, T_dynamic);
+    splines_["base_y"].solve(current_base_y_, goal["base_y"], current_vy_, 0, 0, 0, T_dynamic);
+    splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], current_vw_, 0, 0, 0, T_dynamic);
 
+    // 6. Solve Splines (Arm)
     for (const auto& name : arm_joints_) {
         double q0 = current_arm_positions_[name];
         double qf = goal.count(name) ? goal[name] : q0;
-        // Sync arm to base by using the same T_dynamic
-        splines_[name].solve(q0, qf, 0, 0, 0, 0, T_dynamic);
+        double v0 = current_arm_velocities_[name]; // Use actual current velocity for C2 continuity
+        
+        splines_[name].solve(q0, qf, v0, 0, 0, 0, T_dynamic);
     }
 
-    last_t_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type()); // Reset timer
+    last_t_ = this->now();
     current_time_s_ = 0.0;
-    is_executing_ = true;
     is_executing_ = true;
 }
 
@@ -170,7 +180,7 @@ void JointTrajectoryController::timer_callback() {
 
     // Failsafe
     double pos_error = std::hypot(target_x - current_base_x_, target_y - current_base_y_);
-    if (pos_error > 0.15 || std::abs(yaw_err) > 0.26) {
+    if (pos_error > 0.25 || std::abs(yaw_err) > 0.5) {
         RCLCPP_FATAL(get_logger(), "!!! CRITICAL SAFETY VIOLATION !!!");
         RCLCPP_FATAL(get_logger(), "Pos Error: %.3fm | Yaw Error: %.3frad", pos_error, std::abs(yaw_err));
         base_pub_->publish(geometry_msgs::msg::Twist());
@@ -184,7 +194,7 @@ void JointTrajectoryController::timer_callback() {
     double vx_world = target_vx + 3.0 * (target_x - current_base_x_) + 0.1 * (target_vx - current_vx_);
     double vy_world = target_vy + 3.0 * (target_y - current_base_y_) + 0.1 * (target_vy - current_vy_);
 
-    const double MAX_VEL = 0.35; // m/s
+    const double MAX_VEL = 0.8; // m/s
     double current_speed = std::hypot(vx_world, vy_world);
 
     // Failsafe
@@ -195,17 +205,33 @@ void JointTrajectoryController::timer_callback() {
         return;
     }
 
-    // --- ARM CONTROL (Synchronized) ---
-    auto traj_msg = trajectory_msgs::msg::JointTrajectory();
-    traj_msg.joint_names = arm_joints_;
-    trajectory_msgs::msg::JointTrajectoryPoint pnt;
-    for (const auto& name : arm_joints_) {
-        pnt.positions.push_back(splines_[name].get_pos(current_time_s_));
-        pnt.velocities.push_back(splines_[name].get_vel(current_time_s_)); // Pure rad/s
+    // --- UPDATED ARM CONTROL (Decoupled Frequency) ---
+    arm_pub_counter_++;
+    if (arm_pub_counter_ >= 20) { // Publish arm goal every 200ms
+        arm_pub_counter_ = 0;
+
+        auto traj_msg = trajectory_msgs::msg::JointTrajectory();
+        traj_msg.joint_names = arm_joints_;
+        traj_msg.header.stamp = this->now();
+
+        trajectory_msgs::msg::JointTrajectoryPoint pnt;
+        
+        // Use a longer look-ahead for the hardware buffer (e.g., 200ms)
+        double look_ahead = 0.2; 
+        double eval_time = current_time_s_ + look_ahead;
+
+        for (const auto& name : arm_joints_) {
+            pnt.positions.push_back(splines_[name].get_pos(eval_time));
+            pnt.velocities.push_back(splines_[name].get_vel(eval_time));
+        }
+
+        RCLCPP_INFO(get_logger(), "Sending Arm Lift: %.3f | Arm Flex: %.3f", pnt.positions[0], pnt.positions[1]);
+        
+        pnt.time_from_start = rclcpp::Duration::from_seconds(look_ahead);
+        traj_msg.points.push_back(pnt);
+        
+        arm_pub_->publish(traj_msg);
     }
-    pnt.time_from_start = rclcpp::Duration::from_seconds(dt);
-    traj_msg.points.push_back(pnt);
-    arm_pub_->publish(traj_msg);
 
     // --- BASE PUBLISHING ---
     geometry_msgs::msg::Twist twist;
