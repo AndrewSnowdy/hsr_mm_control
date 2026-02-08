@@ -166,12 +166,14 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
         pinocchio::normalize(model_, q);
         pinocchio::forwardKinematics(model_, data, q);
         pinocchio::updateFramePlacements(model_, data);
+        
 
         RCLCPP_INFO(get_logger(), "completed forwardKinematics");
 
 
         Eigen::Vector3d p = data.oMf[ee_fid_].translation();
         Eigen::Vector3d err = target_p - p;
+        RCLCPP_INFO(get_logger(), "Initial EE Position: %.2f, %.2f, %.2f", p.x(), p.y(), p.z());
 
         if (i % 1 == 0) {
             RCLCPP_INFO(get_logger(), "IK iter %d |err|=%.4f  ee=[%.3f %.3f %.3f]",
