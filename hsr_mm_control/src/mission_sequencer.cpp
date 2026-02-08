@@ -5,7 +5,7 @@ using namespace std::chrono_literals;
 
 MissionSequencer::MissionSequencer()
 : Node("mission_sequencer"),
-    simple_state_(SimpleState::APPROACH)
+    simple_state_(SimpleState::PRE_PRESS)
 {
     mode_pub_ = this->create_publisher<std_msgs::msg::Bool>("/use_ik_mode", 10);
     target_pub_ = this->create_publisher<geometry_msgs::msg::Pose>("/waypoint_target", 10);
@@ -16,7 +16,8 @@ MissionSequencer::MissionSequencer()
     timer_ = this->create_wall_timer(100ms, std::bind(&MissionSequencer::simple_timer, this));
 
     // Button location (odom frame)
-    button_x = 2.44;
+    // button_x = 2.44;
+    button_x = 1.15;
     button_y = 0.0;
     button_z = 1.0;
 
@@ -144,7 +145,7 @@ void MissionSequencer::simple_timer()
 
             // Wait for high precision before the final push
             if (ee_close_xyz(target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.02)) {
-                simple_state_ = SimpleState::PRESS;
+                simple_state_ = SimpleState::DONE;
                 RCLCPP_INFO(this->get_logger(), "PRE_PRESS -> PRESS");
             }
             break;

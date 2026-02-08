@@ -5,6 +5,7 @@
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
+#include <iostream>
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
@@ -83,45 +84,96 @@ FinalPoseNode::FinalPoseNode()
 
 Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
 {
+    RCLCPP_INFO(get_logger(), "nq=%d nv=%d", model_.nq, model_.nv);
+    RCLCPP_INFO(get_logger(), "joint[1]=%s idx_q=%d nq=%d idx_v=%d nv=%d",
+                model_.names[1].c_str(),
+                model_.joints[1].idx_q(), model_.joints[1].nq(),
+                model_.joints[1].idx_v(), model_.joints[1].nv());
+
+    RCLCPP_INFO(get_logger(), "Solver Called! Target: %.2f, %.2f, %.2f", target_p.x(), target_p.y(), target_p.z());
     tf2::Quaternion q_target_tf(
         current_target_.orientation.x,
         current_target_.orientation.y,
         current_target_.orientation.z,
         current_target_.orientation.w);
+
+
+    if (std::abs(q_target_tf.length() - 1.0) > 0.1) {
+        RCLCPP_WARN(get_logger(), "Target Quaternion not normalized! Length: %.4f", q_target_tf.length());
+    }
+
+    q_target_tf.normalize();
+
     double r, p, target_yaw;
     tf2::Matrix3x3(q_target_tf).getRPY(r, p, target_yaw);
-
 
     // Warm start
     Eigen::VectorXd q = pinocchio::neutral(model_);
     q[0] = base_pos_x_;
     q[1] = base_pos_y_;
-    q[2] = std::cos(target_yaw);
-    q[3] = std::sin(target_yaw);
+    q[2] = std::cos(base_yaw_);
+    q[3] = std::sin(base_yaw_);
 
+
+
+    RCLCPP_INFO(get_logger(), "Warm Start Base: X=%.2f, Y=%.2f, Yaw=%.2f", q[0], q[1], base_yaw_);
+
+    pinocchio::normalize(model_, q);
+
+    RCLCPP_INFO(get_logger(), "Warm Start normalized Base: X=%.2f, Y=%.2f, Yaw=%.2f", q[0], q[1], base_yaw_);
+
+
+    // for (const auto& kv : q_map_) {
+    //     if (!joint_name_to_id_.count(kv.first)) continue;
+    //     const auto jid = joint_name_to_id_.at(kv.first);
+    //     int idx = model_.joints[jid].idx_q();
+    //     if (idx >= 0 && idx < q.size()) q[idx] = kv.second;
+    // }
     for (const auto& kv : q_map_) {
         if (!joint_name_to_id_.count(kv.first)) continue;
-        const auto jid = joint_name_to_id_.at(kv.first);
-        int idx = model_.joints[jid].idx_q();
-        if (idx >= 0 && idx < q.size()) q[idx] = kv.second;
+        int jid = joint_name_to_id_.at(kv.first);
+        if (model_.joints[jid].nq() == 1) { // Only standard revolute
+            int idx = model_.joints[jid].idx_q();
+            q[idx] = kv.second;
+        }
     }
 
-    const double damping = 0.1;
-    const double step_size = 0.5;
+
+
+    if (!std::isfinite(target_yaw)) {
+        RCLCPP_ERROR(get_logger(), "Target Yaw is NaN! Orientation was: w=%.2f z=%.2f", 
+                     current_target_.orientation.w, current_target_.orientation.z);
+        return Eigen::VectorXd();
+    }
+
+    const double damping = 0.5;
+    const double step_size = 0.1;
     const int max_iters = 500;
     pinocchio::Data data(model_);
 
 
-
+    
+    RCLCPP_INFO(get_logger(), "starting IK");
 
     for (int i = 0; i < max_iters; ++i) {
+
+        double norm_check = std::sqrt(q[2]*q[2] + q[3]*q[3]);
+        if (std::abs(norm_check - 1.0) > 1e-4) {
+             RCLCPP_ERROR(get_logger(), "ITER %d: Base not normalized BEFORE FK! Norm: %.6f", i, norm_check);
+             pinocchio::normalize(model_, q);
+        }
+
+        pinocchio::normalize(model_, q);
         pinocchio::forwardKinematics(model_, data, q);
         pinocchio::updateFramePlacements(model_, data);
+
+        RCLCPP_INFO(get_logger(), "completed forwardKinematics");
+
 
         Eigen::Vector3d p = data.oMf[ee_fid_].translation();
         Eigen::Vector3d err = target_p - p;
 
-        if (i % 25 == 0) {
+        if (i % 1 == 0) {
             RCLCPP_INFO(get_logger(), "IK iter %d |err|=%.4f  ee=[%.3f %.3f %.3f]",
                     i, err.norm(), p.x(), p.y(), p.z());
         }
@@ -131,12 +183,37 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
             return q;
         }
 
+        std::cout << "Model nv: " << model_.nv << " | Data J size: " << data.J.cols() << std::endl;
+
         Eigen::Matrix<double, 6, Eigen::Dynamic> J(6, model_.nv);
+        J.setZero();
         pinocchio::computeFrameJacobian(model_, data, q, ee_fid_, pinocchio::LOCAL_WORLD_ALIGNED, J);
-                                    
-        if (!J.array().isFinite().all()) return Eigen::VectorXd();;
+
+        RCLCPP_INFO(get_logger(), "got Jacobian");
+
+        for (int col = 0; col < J.cols(); ++col) {
+            if (!J.col(col).allFinite() || J.col(col).array().abs().maxCoeff() > 1e6) {
+                // If a column is exploding, zero it out so it doesn't poison the solver
+                J.col(col).setZero(); 
+            }
+        }
 
         J.col(2).setZero();
+
+
+        std::cout << "--- [ITER " << i << "] JACOBIAN Matrix ---" << std::endl;
+        std::cout << J << std::endl; 
+        std::cout << "---------------------------------------" << std::endl;
+
+        RCLCPP_INFO(get_logger(), "got Jacobian");
+
+                                    
+        if (!J.allFinite()) {
+            RCLCPP_ERROR(get_logger(), "ITER %d: Jacobian contains Non-Finite values!", i);
+            return Eigen::VectorXd();
+        }
+        // if (!J.array().isFinite().all()) return Eigen::VectorXd();;
+
 
         Eigen::MatrixXd Jt = J.topRows<3>();           // 3 x nv
         Eigen::Matrix3d A  = Jt * Jt.transpose();      // 3 x 3
@@ -145,18 +222,45 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
         Eigen::Vector3d alpha = A.ldlt().solve(err);   // 3 x 1
         Eigen::VectorXd dq    = Jt.transpose() * alpha; // nv x 1  <-- IMPORTANT
 
-        if (!dq.array().isFinite().all()) return Eigen::VectorXd();;
+        if (!dq.allFinite()) {
+            RCLCPP_ERROR(get_logger(), "ITER %d: Delta-Q (dq) is Non-Finite!", i);
+            return Eigen::VectorXd();
+        }
+        // if (!dq.array().isFinite().all()) return Eigen::VectorXd();;
  
-        q = pinocchio::integrate(model_, q, dq * step_size);
+        pinocchio::normalize(model_, q);
+
+        try {
+            q = pinocchio::integrate(model_, q, dq * step_size);
+        } catch (...) {
+            RCLCPP_ERROR(get_logger(), "ITER %d: pinocchio::integrate CRASHED!", i);
+            return Eigen::VectorXd();
+        }
+        // q = pinocchio::integrate(model_, q, dq * step_size);
 
         q[2] = std::cos(target_yaw);
         q[3] = std::sin(target_yaw);
 
-        for (int j = 0; j < model_.nq; ++j) {
-            q[j] = std::max(model_.lowerPositionLimit[j], std::min(model_.upperPositionLimit[j], q[j]));
+        // for (int j = 0; j < model_.nq; ++j) {
+        //     if (j == 2 || j == 3) continue; 
+        //     q[j] = std::max(model_.lowerPositionLimit[j], std::min(model_.upperPositionLimit[j], q[j]));
+        // }
+        for (pinocchio::JointIndex jid = 0; jid < model_.njoints; ++jid) {
+            if (model_.joints[jid].nq() != 1) continue;
+                int qidx = model_.joints[jid].idx_q();
+                q[qidx] = std::clamp(q[qidx],
+                                    model_.lowerPositionLimit[qidx],
+                                    model_.upperPositionLimit[qidx]);
         }
 
-        if (!q.allFinite()) return Eigen::VectorXd();;
+
+        pinocchio::normalize(model_, q);
+
+        if (!q.allFinite()) {
+            RCLCPP_ERROR(get_logger(), "ITER %d: q contains Non-Finite values after limits!", i);
+            return Eigen::VectorXd();
+        }
+        // if (!q.allFinite()) return Eigen::VectorXd();;
 
     }
 
@@ -211,10 +315,6 @@ void FinalPoseNode::tick() {
     } 
     else {
         // --- MODE: IK MANIPULATION ---
-        // Only run the solver when close enough to reach naturally
-        Eigen::VectorXd q_nominal = pinocchio::neutral(model_);
-        if (arm_name_to_qidx_.count("arm_lift_joint")) 
-            q_nominal[arm_name_to_qidx_["arm_lift_joint"]] = 1.0;
         
         // Use your Change Detection logic here to save CPU
         double dist_change = 100.0;
@@ -269,6 +369,8 @@ void FinalPoseNode::loadPinocchioModel()
     
     for (pinocchio::JointIndex i = 0; i < (pinocchio::JointIndex)model_.njoints; ++i) {
         joint_name_to_id_[model_.names[i]] = i;
+        RCLCPP_INFO(get_logger(), "Joint [%ld]: %s | Vel Index (col): %d | nq: %d", 
+                i, model_.names[i].c_str(), model_.joints[i].idx_v(), model_.joints[i].nv());
     }
 
     // ---- PRECOMPUTE GHOST LAYOUT ----

@@ -45,7 +45,9 @@ JointTrajectoryController::JointTrajectoryController() : Node("joint_trajectory_
     );
 
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        "/odom", 10,
+        // "/odom",
+        "/omni_base_controller/wheel_odom", // since /odom is not published (issues with lidar)
+         10,
         std::bind(&JointTrajectoryController::odom_callback, this, std::placeholders::_1)
     );
 
@@ -63,7 +65,7 @@ JointTrajectoryController::JointTrajectoryController() : Node("joint_trajectory_
     arm_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/arm_trajectory_controller/joint_trajectory", 10);
     base_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/omni_base_controller/cmd_vel", 10);
 
-    timer_ = this->create_wall_timer(std::chrono::milliseconds(20), std::bind(&JointTrajectoryController::timer_callback, this));
+    timer_ = this->create_wall_timer(std::chrono::milliseconds(10), std::bind(&JointTrajectoryController::timer_callback, this));
 
     arm_joints_ = {"arm_lift_joint", "arm_flex_joint", "arm_roll_joint", "wrist_flex_joint", "wrist_roll_joint"};
 
@@ -99,7 +101,7 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     if (L < 0.01) return;
 
     // --- DYNAMIC TIME CALCULATION ---
-    double desired_cruise_vel = 0.125; // Target speed in m/s
+    double desired_cruise_vel = 0.1; // Target speed in m/s
     // Time = Distance / Speed. We cap it at 0.5s minimum to prevent infinite acceleration
     double T_dynamic = std::max(L / desired_cruise_vel, 3.5); 
     
@@ -168,7 +170,7 @@ void JointTrajectoryController::timer_callback() {
 
     // Failsafe
     double pos_error = std::hypot(target_x - current_base_x_, target_y - current_base_y_);
-    if (pos_error > 0.05 || std::abs(yaw_err) > 0.26) {
+    if (pos_error > 0.15 || std::abs(yaw_err) > 0.26) {
         RCLCPP_FATAL(get_logger(), "!!! CRITICAL SAFETY VIOLATION !!!");
         RCLCPP_FATAL(get_logger(), "Pos Error: %.3fm | Yaw Error: %.3frad", pos_error, std::abs(yaw_err));
         base_pub_->publish(geometry_msgs::msg::Twist());
@@ -182,7 +184,7 @@ void JointTrajectoryController::timer_callback() {
     double vx_world = target_vx + 3.0 * (target_x - current_base_x_) + 0.1 * (target_vx - current_vx_);
     double vy_world = target_vy + 3.0 * (target_y - current_base_y_) + 0.1 * (target_vy - current_vy_);
 
-    const double MAX_VEL = 0.28; // m/s
+    const double MAX_VEL = 0.35; // m/s
     double current_speed = std::hypot(vx_world, vy_world);
 
     // Failsafe

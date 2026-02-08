@@ -32,7 +32,7 @@ private:
 
 private:
     // --- state ---
-    SimpleState simple_state_{SimpleState::APPROACH};
+    SimpleState simple_state_{SimpleState::PRE_PRESS};
 
     // --- pubs ---
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mode_pub_;
