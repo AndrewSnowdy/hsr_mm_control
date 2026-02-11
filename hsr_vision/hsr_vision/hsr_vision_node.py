@@ -1,54 +1,65 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Point
+from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
 from cv_bridge import CvBridge
 from ultralytics import YOLO
+from ament_index_python.packages import get_package_share_directory
 import os
 
 class HSRVisionNode(Node):
     def __init__(self):
         super().__init__('hsr_vision_node')
         
-        # 1. Improved Pathing: Look in the 'models' folder of your package
-        # Update this to your actual best.pt location in hsr_ros2_ws
-        model_path = os.path.expanduser('~/hsr_ros2_ws/src/hsr_vision/models/best.pt')
+        # INDUSTRY STANDARD: Get the model path dynamically from the 'share' folder
+        package_share_dir = get_package_share_directory('hsr_vision')
+        model_path = os.path.join(package_share_dir, 'models', 'best.pt')
+        
         self.model = YOLO(model_path) 
         self.bridge = CvBridge()
-        
-        # Map IDs to names based on your hsr_run_2 results
         self.class_names = {0: 'dual_button', 1: 'prox_button', 2: 'single_button'}
         
-        self.coord_pub = self.create_publisher(Point, '/detected_button_coords', 10)
+        # INDUSTRY STANDARD: Use Detection2DArray instead of Point
+        self.detection_pub = self.create_publisher(Detection2DArray, '/detected_buttons', 10)
         
         self.subscription = self.create_subscription(
             Image,
-            '/hsr/head_rgbd_sensor/rgb/image_raw',
+            '/rgb_PS1080_PrimeSense/rgb/image_rect_color', # Use the rectified topic we found
             self.image_callback,
             10)
         
-        self.get_logger().info("HSR Multi-Class Vision Node Started.")
+        self.get_logger().info("HSR Vision Node initialized using package share directory.")
 
     def image_callback(self, msg):
         cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        results = self.model(cv_image, conf=0.6, verbose=False)
         
-        # Run Inference with your new 3-class model
-        results = self.model(cv_image, conf=0.6, stream=True)
+        detection_array = Detection2DArray()
+        detection_array.header = msg.header # Keep the timestamp for depth syncing later
         
         for result in results:
             for box in result.boxes:
-                x_center = float(box.xywh[0][0])
-                y_center = float(box.xywh[0][1])
-                class_id = int(box.cls[0])
-                label = self.class_names.get(class_id, "unknown")
+                # Create standard ROS detection message
+                det = Detection2D()
                 
-                btn_point = Point()
-                btn_point.x = x_center
-                btn_point.y = y_center
-                btn_point.z = float(class_id) # Z stores the class ID for the controller
+                # Bounding Box info
+                det.bbox.center.position.x = float(box.xywh[0][0])
+                det.bbox.center.position.y = float(box.xywh[0][1])
+                det.bbox.size_x = float(box.xywh[0][2])
+                det.bbox.size_y = float(box.xywh[0][3])
                 
-                self.coord_pub.publish(btn_point)
-                self.get_logger().info(f"Detected {label} at: x={x_center:.1f}, y={y_center:.1f}")
+                # Class and Confidence info
+                hyp = ObjectHypothesisWithPose()
+                hyp.hypothesis.class_id = str(int(box.cls[0]))
+                hyp.hypothesis.score = float(box.conf[0])
+                det.results.append(hyp)
+                
+                detection_array.detections.append(det)
+                
+                label = self.class_names.get(int(box.cls[0]), "unknown")
+                self.get_logger().info(f"Detected {label} at [{det.bbox.center.position.x}, {det.bbox.center.position.y}]")
+
+        self.detection_pub.publish(detection_array)
 
 def main(args=None):
     rclpy.init(args=args)

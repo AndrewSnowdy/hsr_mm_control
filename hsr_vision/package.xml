@@ -2,3 +2,5 @@
 <depend>sensor_msgs</depend>
 <depend>geometry_msgs</depend>
 <depend>cv_bridge</depend>
+<depend>vision_msgs</depend>
+<depend>ament_index_python</depend>
