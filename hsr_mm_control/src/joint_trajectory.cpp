@@ -45,8 +45,8 @@ JointTrajectoryController::JointTrajectoryController() : Node("joint_trajectory_
     );
 
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        // "/odom",
-        "/omni_base_controller/wheel_odom", // since /odom is not published (issues with lidar)
+        "/odom",
+        // "/omni_base_controller/wheel_odom", // since /odom is not published (issues with lidar)
          10,
         std::bind(&JointTrajectoryController::odom_callback, this, std::placeholders::_1)
     );
@@ -193,6 +193,7 @@ void JointTrajectoryController::timer_callback() {
     // PD Controller (Gains: kp=3.0, kd=0.1)
     double vx_world = target_vx + 3.0 * (target_x - current_base_x_) + 0.1 * (target_vx - current_vx_);
     double vy_world = target_vy + 3.0 * (target_y - current_base_y_) + 0.1 * (target_vy - current_vy_);
+    
 
     const double MAX_VEL = 0.8; // m/s
     double current_speed = std::hypot(vx_world, vy_world);
@@ -205,39 +206,51 @@ void JointTrajectoryController::timer_callback() {
         return;
     }
 
-    // --- UPDATED ARM CONTROL (Decoupled Frequency) ---
-    arm_pub_counter_++;
-    if (arm_pub_counter_ >= 20) { // Publish arm goal every 200ms
-        arm_pub_counter_ = 0;
+    // // --- UPDATED ARM CONTROL (Decoupled Frequency) ---
+    // arm_pub_counter_++;
+    // if (arm_pub_counter_ >= 20) { // Publish arm goal every 200ms
+    //     arm_pub_counter_ = 0;
 
-        auto traj_msg = trajectory_msgs::msg::JointTrajectory();
-        traj_msg.joint_names = arm_joints_;
-        traj_msg.header.stamp = this->now();
+    //     auto traj_msg = trajectory_msgs::msg::JointTrajectory();
+    //     traj_msg.joint_names = arm_joints_;
+    //     traj_msg.header.stamp = this->now();
 
-        trajectory_msgs::msg::JointTrajectoryPoint pnt;
+    //     trajectory_msgs::msg::JointTrajectoryPoint pnt;
         
-        // Use a longer look-ahead for the hardware buffer (e.g., 200ms)
-        double look_ahead = 0.2; 
-        double eval_time = current_time_s_ + look_ahead;
+    //     // Use a longer look-ahead for the hardware buffer (e.g., 200ms)
+    //     double look_ahead = 0.1; 
+    //     double eval_time = current_time_s_ + look_ahead;
 
-        for (const auto& name : arm_joints_) {
-            pnt.positions.push_back(splines_[name].get_pos(eval_time));
-            pnt.velocities.push_back(splines_[name].get_vel(eval_time));
-        }
+    //     for (const auto& name : arm_joints_) {
+    //         pnt.positions.push_back(splines_[name].get_pos(eval_time));
+    //         pnt.velocities.push_back(splines_[name].get_vel(eval_time));
+    //     }
 
-        RCLCPP_INFO(get_logger(), "Sending Arm Lift: %.3f | Arm Flex: %.3f", pnt.positions[0], pnt.positions[1]);
+    //     RCLCPP_INFO(get_logger(), "Sending Arm Lift: %.3f | Arm Flex: %.3f", pnt.positions[0], pnt.positions[1]);
         
-        pnt.time_from_start = rclcpp::Duration::from_seconds(look_ahead);
-        traj_msg.points.push_back(pnt);
+    //     pnt.time_from_start = rclcpp::Duration::from_seconds(look_ahead);
+    //     traj_msg.points.push_back(pnt);
         
-        arm_pub_->publish(traj_msg);
+    //     arm_pub_->publish(traj_msg);
+    // }
+
+    // --- ARM CONTROL (Synchronized) ---
+    auto traj_msg = trajectory_msgs::msg::JointTrajectory();
+    traj_msg.joint_names = arm_joints_;
+    trajectory_msgs::msg::JointTrajectoryPoint pnt;
+    for (const auto& name : arm_joints_) {
+        pnt.positions.push_back(splines_[name].get_pos(current_time_s_));
+        pnt.velocities.push_back(splines_[name].get_vel(current_time_s_)); // Pure rad/s
     }
+    pnt.time_from_start = rclcpp::Duration::from_seconds(dt);
+    traj_msg.points.push_back(pnt);
+    arm_pub_->publish(traj_msg);
 
     // --- BASE PUBLISHING ---
     geometry_msgs::msg::Twist twist;
     twist.linear.x = vx_world * cos(current_yaw_) + vy_world * sin(current_yaw_);
     twist.linear.y = -vx_world * sin(current_yaw_) + vy_world * cos(current_yaw_);
-    twist.angular.z = target_vw + (1.5 * yaw_err);
+    twist.angular.z = target_vw + (2.5 * yaw_err);
     
     base_pub_->publish(twist);
 }

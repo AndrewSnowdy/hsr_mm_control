@@ -183,7 +183,7 @@ void MissionSequencer::simple_timer()
             target_pub_->publish(target_pose);
 
             // Check if we've backed away enough
-            if (base_close_xyw(target_pose.position.x, target_pose.position.y, target_yaw, 0.05, 0.125)) {
+            if (base_close_xyw(target_pose.position.x, target_pose.position.y, target_yaw, 0.05, 0.015)) {
                 simple_state_ = SimpleState::EXIT;
                 RCLCPP_INFO(this->get_logger(), "RETRACT -> EXIT");
             }
