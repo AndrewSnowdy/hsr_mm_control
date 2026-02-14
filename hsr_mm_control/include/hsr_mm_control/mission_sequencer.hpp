@@ -7,12 +7,13 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <sensor_msgs/msg/joy.hpp>
 
 #include <cmath>
 #include <memory>
 
 // Minimal states
-enum class SimpleState { APPROACH, PRE_PRESS, PRESS, DONE, EXIT, RETRACT};
+enum class SimpleState { MANUAL, APPROACH, PRE_PRESS, PRESS, DONE, EXIT, RETRACT};
 
 class MissionSequencer : public rclcpp::Node {
 public:
@@ -29,14 +30,18 @@ private:
 
     bool base_close_xyw(double tx, double ty, double tw, double tol_xy, double tol_w);
     bool ee_close_xyz(double tx, double ty, double tz, double tol_xyz);
+    geometry_msgs::msg::Pose compute_standoff_goal(double bx, double by, double rx, double ry, double r_standoff);
+
 
 private:
     // --- state ---
-    SimpleState simple_state_{SimpleState::APPROACH};
+    SimpleState simple_state_{SimpleState::MANUAL};
 
     // --- pubs ---
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mode_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Pose>::SharedPtr target_pub_;
+
+    rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
 
     // --- timer ---
     rclcpp::TimerBase::SharedPtr timer_;
@@ -51,7 +56,19 @@ private:
     double button_z{1.0};
 
     // --- frame names ---
+    std::string map_frame_{"map"};
     std::string odom_frame_{"odom"};
     std::string base_frame_{"base_link"};
     std::string ee_frame_{"hand_palm_link"};
+
+
+    // --- Logic Control ---
+    bool goal_captured_{false};
+
+    rclcpp::Subscription<geometry_msgs::msg::Pose>::SharedPtr mission_sub_;
+
+    // Variables to store the 'snapped' goal
+    double goal_x{0.0};
+    double goal_y{0.0};
+    double goal_z{0.0};
 };
