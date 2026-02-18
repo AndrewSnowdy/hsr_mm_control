@@ -1,5 +1,7 @@
 from setuptools import setup
-
+import os
+from glob import glob
+    
 package_name = 'hsr_vision'
 
 setup(
@@ -10,8 +12,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        # This line ensures your .pt model is actually installed!
-        ('share/' + package_name + '/models', ['models/best.pt']), 
+        # Use glob() here to actually expand the file list
+        (os.path.join('share', package_name, 'models'), glob('models/*.pt')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
