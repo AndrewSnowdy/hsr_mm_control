@@ -82,6 +82,13 @@ void JointTrajectoryController::odom_callback(const nav_msgs::msg::Odometry::Sha
     tf2::Quaternion q(msg->pose.pose.orientation.x, msg->pose.pose.orientation.y,
                       msg->pose.pose.orientation.z, msg->pose.pose.orientation.w);
     double r, p, y;
+
+    double cy = std::cos(current_yaw_);
+    double sy = std::sin(current_yaw_);
+
+    current_vx_world_ = current_vx_ * cy - current_vy_ * sy;
+    current_vy_world_ = current_vx_ * sy + current_vy_ * cy;
+
     tf2::Matrix3x3(q).getRPY(r, p, y);
     current_yaw_ = y;
 }
@@ -122,9 +129,9 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     total_expected_time_ = T_dynamic;
 
     // 5. Solve Splines (Base)
-    splines_["base_x"].solve(current_base_x_, goal["base_x"], current_vx_, 0, 0, 0, T_dynamic);
-    splines_["base_y"].solve(current_base_y_, goal["base_y"], current_vy_, 0, 0, 0, T_dynamic);
-    splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], current_vw_, 0, 0, 0, T_dynamic);
+    splines_["base_x"].solve(current_base_x_, goal["base_x"], current_vx_world_, 0, 0, 0, T_dynamic);
+    splines_["base_y"].solve(current_base_y_, goal["base_y"], current_vy_world_, 0, 0, 0, T_dynamic);
+    splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], 0, 0, 0, 0, T_dynamic); // or current_vw_
 
     // 6. Solve Splines (Arm)
     for (const auto& name : arm_joints_) {
@@ -191,8 +198,9 @@ void JointTrajectoryController::timer_callback() {
     
 
     // PD Controller (Gains: kp=3.0, kd=0.1)
-    double vx_world = target_vx + 3.0 * (target_x - current_base_x_) + 0.1 * (target_vx - current_vx_);
-    double vy_world = target_vy + 3.0 * (target_y - current_base_y_) + 0.1 * (target_vy - current_vy_);
+    double vx_world = target_vx + 3.0 * (target_x - current_base_x_) + 0.1 * (target_vx - current_vx_world_);
+    double vy_world = target_vy + 3.0 * (target_y - current_base_y_) + 0.1 * (target_vy - current_vy_world_);
+
     
 
     const double MAX_VEL = 0.8; // m/s
@@ -248,8 +256,8 @@ void JointTrajectoryController::timer_callback() {
 
     // --- BASE PUBLISHING ---
     geometry_msgs::msg::Twist twist;
-    twist.linear.x = vx_world * cos(current_yaw_) + vy_world * sin(current_yaw_);
-    twist.linear.y = -vx_world * sin(current_yaw_) + vy_world * cos(current_yaw_);
+    twist.linear.x = vx_world * cos(target_yaw) + vy_world * sin(target_yaw);
+    twist.linear.y = -vx_world * sin(target_yaw) + vy_world * cos(target_yaw);
     twist.angular.z = target_vw + (2.5 * yaw_err);
     
     base_pub_->publish(twist);

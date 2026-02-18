@@ -2,7 +2,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from hsrb_launch_utils.hsrb_launch_utils import declare_launch_arguments
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -42,7 +42,7 @@ def generate_launch_description():
         "robot_pos_z": "0.0",
         "robot_rpy_Y": "0.0"
     }
-    my_world_path = os.path.join(pkg_hsr_mm_control, 'worlds', 'hsr_mm.world')
+    my_world_path = os.path.join(pkg_hsr_mm_control, 'worlds', 'door.world')
 
     hsrb_gazebo_common = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(hsrb_gazebo_common_path),
@@ -74,9 +74,19 @@ def generate_launch_description():
         condition=IfCondition(show_ghost)
     )
 
+    # --- NEW: Door Button Bridge Script ---
+    door_button_bridge_path = os.path.join(pkg_hsr_mm_control, 'worlds', 'door_button_bridge.py')
+    
+    door_button_bridge = ExecuteProcess(
+        cmd=['python3', door_button_bridge_path],
+        output='screen',
+        name='door_button_bridge'
+    )
+
     return LaunchDescription(declared_arguments + [
         show_ghost_arg,
         hsrb_gazebo_common,
         kinematic_setpoint_node,
-        ghost_rsp
+        ghost_rsp,
+        door_button_bridge  # Add this line
     ])

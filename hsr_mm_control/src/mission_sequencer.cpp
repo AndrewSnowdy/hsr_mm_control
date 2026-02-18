@@ -1,4 +1,5 @@
 #include "hsr_mm_control/mission_sequencer.hpp"
+#include "hsr_mm_control/utils.hpp"
 
 using namespace std::chrono_literals;
 
@@ -9,6 +10,7 @@ MissionSequencer::MissionSequencer()
 {
     mode_pub_ = this->create_publisher<std_msgs::msg::Bool>("/use_ik_mode", 10);
     target_pub_ = this->create_publisher<geometry_msgs::msg::Pose>("/waypoint_target", 10);
+    marker_array_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("feasible_samples", 10);
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -22,6 +24,18 @@ MissionSequencer::MissionSequencer()
                 RCLCPP_ERROR(this->get_logger(), "EMERGENCY STOP: Reverting to MANUAL");
                 simple_state_ = SimpleState::MANUAL;
             }
+        });
+
+    auto costmap_qos = rclcpp::QoS(rclcpp::KeepLast(1))
+        .reliable()
+        .transient_local(); // Crucial for Nav2 Costmaps
+
+    costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>( // Change type here
+        "/local_costmap/costmap",
+        costmap_qos,
+        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+            latest_costmap_ = *msg;
+            have_costmap_ = true;
         });
 
     RCLCPP_INFO(this->get_logger(), "MissionSequencer initialized. Waiting for /initial_mission_pose...");
@@ -126,7 +140,7 @@ void MissionSequencer::simple_timer()
     std_msgs::msg::Bool mode_msg;
 
     double current_x, current_y, current_z, current_yaw;
-    if (!get_tf_xyz("map", base_frame_, current_x, current_y, current_z) || 
+    if (!get_tf_xyz(map_frame_, base_frame_, current_x, current_y, current_z) || 
         !get_base_yaw(current_yaw)) {
         return; // Don't act if TF is missing
     }
@@ -158,30 +172,30 @@ void MissionSequencer::simple_timer()
         }
         
         case SimpleState::APPROACH: {
+            // Current base pose in map
             double rx, ry, rz;
-            if (!get_tf_xyz("map", base_frame_, rx, ry, rz)) return;
+            if (!get_tf_xyz(map_frame_, base_frame_, rx, ry, rz)) return;
 
-                const double r_standoff = 0.80;      // pick 0.7–1.2 typically
-                const double tol_xy     = 0.10;      // standoff acceptance
-                const double tol_yaw    = 0.25;      // ~15 deg
+            const double r_standoff = 1.25;
+            const double tol_xy     = 0.10;
+            const double tol_yaw    = 0.25;
 
-                auto goal = compute_standoff_goal(button_x, button_y, rx, ry, r_standoff);
-                target_pub_->publish(goal);
+            // Compute final standoff goal (on ring facing the button)
+            auto final_goal = compute_standoff_goal(button_x, button_y, rx, ry, r_standoff);
 
-                // check convergence (in map frame!)
-                double gx = goal.position.x;
-                double gy = goal.position.y;
+            target_pub_->publish(final_goal);
 
-                // extract yaw from goal
-                tf2::Quaternion q(goal.orientation.x, goal.orientation.y,
-                                    goal.orientation.z, goal.orientation.w);
-                double gr, gp, gyaw;
-                tf2::Matrix3x3(q).getRPY(gr, gp, gyaw);
+            // Transition based on reaching the *final* goal, not the sub-goal
+            tf2::Quaternion q(final_goal.orientation.x, final_goal.orientation.y,
+                            final_goal.orientation.z, final_goal.orientation.w);
+            double gr, gp, final_yaw;
+            tf2::Matrix3x3(q).getRPY(gr, gp, final_yaw);
 
-                if (base_close_xyw(gx, gy, gyaw, tol_xy, tol_yaw)) {
-                    RCLCPP_INFO(this->get_logger(), "Standoff reached -> PRE_PRESS");
-                    simple_state_ = SimpleState::PRE_PRESS;
-                }
+            if (base_close_xyw(final_goal.position.x, final_goal.position.y, final_yaw, tol_xy, tol_yaw)) {
+                RCLCPP_INFO(this->get_logger(), "Standoff reached -> PRE_PRESS");
+                simple_state_ = SimpleState::PRE_PRESS;
+            }
+
             break;
         }
 
@@ -190,14 +204,52 @@ void MissionSequencer::simple_timer()
             mode_msg.data = true; // Switch to IK mode
             mode_pub_->publish(mode_msg);
 
-            // Move EE to a "Standoff" position 10cm away from the button
-            target_pose.position.x = button_x - 0.15; 
-            target_pose.position.y = button_y;
+            if (!have_costmap_) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+                                    "Waiting for costmap on topic: /local_costmap/costmap...");
+                return; // Exit early since we can't calculate a standoff without a map
+            }
+
+            // 1) Compute feasible standoff ONCE
+            if (have_costmap_ && !have_standoff_) {
+                geometry_msgs::msg::Pose result_pose;
+
+                double rx, ry, rz;
+                if (!get_tf_xyz(map_frame_, base_frame_, rx, ry, rz)) return;
+
+                bool success = standoff_utils::compute_feasible_standoff(
+                    button_x, button_y, rx, ry, // Pass robot position
+                    latest_costmap_, 0.80, 72, 15,
+                    result_pose, debug_feasible_poses_);
+
+                if (success) {
+                    cached_standoff_ = result_pose;
+                    have_standoff_ = true;
+                    RCLCPP_INFO(this->get_logger(), "Feasible standoff locked.");
+                    publish_feasible_cloud(debug_feasible_poses_);
+                } else {
+                    RCLCPP_ERROR(this->get_logger(), "No safe standoff found! Aborting to MANUAL.");
+                    simple_state_ = SimpleState::MANUAL;
+                    break;
+                }
+            }
+
+            // 2) Extract the pre-calculated yaw from the cached pose
+            tf2::Quaternion q(cached_standoff_.orientation.x, cached_standoff_.orientation.y,
+                            cached_standoff_.orientation.z, cached_standoff_.orientation.w);
+            double r, p, press_yaw;
+            tf2::Matrix3x3(q).getRPY(r, p, press_yaw);
+
+            // 3) Offset the EE slightly from the button along that same yaw
+            const double ee_standoff_dist = 0.15;
+            target_pose.position.x = button_x - ee_standoff_dist * std::cos(press_yaw);
+            target_pose.position.y = button_y - ee_standoff_dist * std::sin(press_yaw);
             target_pose.position.z = button_z;
-            set_yaw(target_pose, 0.0);
+            set_yaw(target_pose, press_yaw);
+
             target_pub_->publish(target_pose);
 
-            // Wait for high precision before the final push
+            // 4) Check for convergence
             if (ee_close_xyz(target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.02)) {
                 simple_state_ = SimpleState::PRESS;
                 RCLCPP_INFO(this->get_logger(), "PRE_PRESS -> PRESS");
@@ -206,18 +258,29 @@ void MissionSequencer::simple_timer()
         }
 
         case SimpleState::PRESS: {
-            mode_msg.data = true;                // IK mode
+            mode_msg.data = true; // IK mode
             mode_pub_->publish(mode_msg);
 
-            // Just go to the press goal directly
-            target_pose.position.x = button_x - 0.08;
-            target_pose.position.y = button_y;
-            target_pose.position.z = button_z - 0.02;
-            set_yaw(target_pose, 0.0);
+            // 1) Extract the yaw from the standoff we validated in PRE_PRESS
+            tf2::Quaternion q(cached_standoff_.orientation.x, cached_standoff_.orientation.y,
+                            cached_standoff_.orientation.z, cached_standoff_.orientation.w);
+            double r, p, press_yaw;
+            tf2::Matrix3x3(q).getRPY(r, p, press_yaw);
+
+            // 2) Move "deeper" into the button. 
+            // We change the offset from 0.15 (standoff) to 0.05 (pressing depth)
+            const double push_depth = 0.025; 
+            target_pose.position.x = button_x - push_depth * std::cos(press_yaw);
+            target_pose.position.y = button_y - push_depth * std::sin(press_yaw);
+            
+            // Keep your hardcoded Z-offset for a slight downward "press" feel
+            target_pose.position.z = button_z - 0.05; 
+            
+            set_yaw(target_pose, press_yaw);
             target_pub_->publish(target_pose);
 
-            // Use something realistic (1–3cm)
-            if (ee_close_xyz(target_pose.position.x, target_pose.position.y, target_pose.position.z, /*tol_xyz=*/0.02)) {
+            // 3) Check for convergence
+            if (ee_close_xyz(target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.025)) {
                 simple_state_ = SimpleState::RETRACT;
                 RCLCPP_INFO(this->get_logger(), "PRESS -> RETRACT");
             }
@@ -225,24 +288,40 @@ void MissionSequencer::simple_timer()
         }
 
         case SimpleState::RETRACT: {
-            mode_msg.data = false; // Keep IK mode for precise arm movement
+            mode_msg.data = false; // Base control mode
             mode_pub_->publish(mode_msg);
 
-            // Back away from the button (move back 30cm and slightly up)
-            target_pose.position.x = button_x - 0.80; 
-            target_pose.position.y = button_y;
-            target_pose.position.z = button_z + 0.10; 
-            double target_yaw = 1.57; 
+            // 1. Get the original press heading
+            tf2::Quaternion q_standoff(cached_standoff_.orientation.x, cached_standoff_.orientation.y,
+                                    cached_standoff_.orientation.z, cached_standoff_.orientation.w);
+            double r, p, press_yaw;
+            tf2::Matrix3x3(q_standoff).getRPY(r, p, press_yaw);
+
+            // 2. Define the target heading (Pivot 40-60 degrees toward the door)
+            // Using your M_PI * 2 / 9.0 (40 degrees) logic
+            double target_yaw = press_yaw + (M_PI * 2.0 / 9.0); 
+            while (target_yaw > M_PI) target_yaw -= 2.0 * M_PI;
+            while (target_yaw < -M_PI) target_yaw += 2.0 * M_PI;
+
+            // 3. Move back to a "Safety Distance" (0.6m is usually enough to rotate safely)
+            const double safety_dist = 0.60;
+            target_pose.position.x = button_x - safety_dist * std::cos(press_yaw);
+            target_pose.position.y = button_y - safety_dist * std::sin(press_yaw);
+            target_pose.position.z = button_z; // Keep arm height steady
+            
+            // Face the target yaw while backing up
             set_yaw(target_pose, target_yaw);
             target_pub_->publish(target_pose);
 
-            // Check if we've backed away enough
-            if (base_close_xyw(target_pose.position.x, target_pose.position.y, target_yaw, 0.05, 0.015)) {
-                simple_state_ = SimpleState::EXIT;
-                RCLCPP_INFO(this->get_logger(), "RETRACT -> EXIT");
+            // 4. Convergence Check
+            // Use a slightly looser tolerance for the exit transition
+            if (base_close_xyw(target_pose.position.x, target_pose.position.y, target_yaw, 0.08, 0.15)) {
+                simple_state_ = SimpleState::DONE;
+                RCLCPP_INFO(this->get_logger(), "RETRACT -> EXIT (Safe pivot achieved)");
             }
             break;
         }
+
         case SimpleState::EXIT: {
             mode_msg.data = false; 
             mode_pub_->publish(mode_msg);
@@ -314,6 +393,35 @@ geometry_msgs::msg::Pose MissionSequencer::compute_standoff_goal(
   return goal;
 }
 
+void MissionSequencer::publish_feasible_cloud(const std::vector<geometry_msgs::msg::Pose>& poses)
+{
+    visualization_msgs::msg::MarkerArray arr;
+
+    // Clear previous
+    visualization_msgs::msg::Marker clear;
+    clear.action = visualization_msgs::msg::Marker::DELETEALL;
+    arr.markers.push_back(clear);
+
+    int id = 0;
+    for (const auto& p : poses) {
+        visualization_msgs::msg::Marker m;
+        // Use the frame the costmap lives in (likely "odom")
+        m.header.frame_id = latest_costmap_.header.frame_id; 
+        m.header.stamp = this->now();
+        m.ns = "feasible_points";
+        m.id = id++;
+        m.type = visualization_msgs::msg::Marker::SPHERE;
+        m.action = visualization_msgs::msg::Marker::ADD;
+
+        m.pose = p;
+        m.pose.position.z = 0.05; 
+        m.scale.x = 0.08; m.scale.y = 0.08; m.scale.z = 0.08;
+
+        m.color.r = 0.0f; m.color.g = 1.0f; m.color.b = 0.0f; m.color.a = 0.8f;
+        arr.markers.push_back(m);
+    }
+    marker_array_pub_->publish(arr);
+}
 
 int main(int argc, char ** argv)
 {

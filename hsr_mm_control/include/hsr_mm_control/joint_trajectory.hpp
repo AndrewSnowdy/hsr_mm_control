@@ -51,6 +51,10 @@ private:
     double current_base_y_ = 0.0;
     double current_yaw_ = 0.0;
 
+    double current_vx_world_ = 0.0;
+    double current_vy_world_ = 0.0; 
+
+
     double current_vx_ = 0.0;
     double current_vy_ = 0.0;
     double current_vw_ = 0.0;

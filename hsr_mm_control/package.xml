@@ -20,6 +20,7 @@
   <depend>sensor_msgs</depend>
   <depend>trajectory_msgs</depend>
   <depend>nav2_msgs</depend>
+  <depend>visualization_msgs</depend>
 
 
 

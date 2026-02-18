@@ -18,6 +18,7 @@ find_package(tf2_ros REQUIRED)
 find_package(pinocchio REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(nav2_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 
 # ---- Utils library ----
@@ -91,6 +92,7 @@ ament_target_dependencies(mission_sequencer
   tf2
   tf2_ros
   tf2_geometry_msgs
+  visualization_msgs
 )
 target_link_libraries(mission_sequencer
   hsr_mm_utils
@@ -106,17 +108,14 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+
 # Install headers
 install(DIRECTORY include/
   DESTINATION include
 )
 
 # FIXED: Combined launch and worlds install
-install(DIRECTORY launch worlds
-  DESTINATION share/${PROJECT_NAME}
-)
-
-install(DIRECTORY urdf
+install(DIRECTORY launch worlds urdf
   DESTINATION share/${PROJECT_NAME}
 )
 
