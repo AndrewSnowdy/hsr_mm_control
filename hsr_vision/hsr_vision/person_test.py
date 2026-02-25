@@ -53,7 +53,7 @@ class HSRDetailedProfileNode(Node):
             self.rgb_callback,
             fast_qos)
 
-        self.detection_pub = self.create_publisher(Detection2DArray, '/detected_people', 10)
+        self.detection_pub = self.create_publisher(Detection2DArray, '/detected_objects', 10)
         self.debug_pub = self.create_publisher(Image, '/people_debug_image', 10)
 
         self.get_logger().info("Node Started: Detailed Timing Active")
