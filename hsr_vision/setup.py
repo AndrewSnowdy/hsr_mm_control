@@ -9,11 +9,9 @@ setup(
     version='0.0.0',
     packages=[package_name],
     data_files=[
-        ('share/ament_index/resource_index/packages',
-            ['resource/' + package_name]),
+        ('share/ament_index/resource_index/packages',['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        # Use glob() here to actually expand the file list
-        (os.path.join('share', package_name, 'models'), glob('models/*.pt')),
+        (os.path.join('share', package_name, 'models'), glob('models/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -26,6 +24,7 @@ setup(
         'console_scripts': [
             # This allows you to run: ros2 run hsr_vision hsr_vision_node
             'hsr_vision_node = hsr_vision.hsr_vision_node:main',
+            'person_test = hsr_vision.person_test:main',
         ],
     },
 )
