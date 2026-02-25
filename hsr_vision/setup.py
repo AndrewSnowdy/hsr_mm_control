@@ -23,7 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             # This allows you to run: ros2 run hsr_vision hsr_vision_node
-            'hsr_vision_node = hsr_vision.hsr_vision_node:main',
+            'hsr_vision_node = hsr_vision.hsr_image_processing:main',
             'person_test = hsr_vision.person_test:main',
         ],
     },
