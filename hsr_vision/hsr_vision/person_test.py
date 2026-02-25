@@ -23,9 +23,11 @@ class HSRDetailedProfileNode(Node):
         
         self.get_logger().info(f"Loading model from: {human_path}")
         self.human_model = YOLO(human_path, task='detect') 
+        self.get_logger().info(f"HUMAN Model Classes: {self.human_model.names}")
         
         self.get_logger().info(f"Loading Button Model: {button_path}")
         self.button_model = YOLO(button_path, task='detect')
+        self.get_logger().info(f"BUTTON Model Classes: {self.button_model.names}")
 
         self.bridge = CvBridge()
         self.latest_depth = None 
