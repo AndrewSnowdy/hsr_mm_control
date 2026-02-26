@@ -44,6 +44,7 @@ private:
     // --- pubs ---
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mode_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Pose>::SharedPtr target_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr door_lock_pub_;
 
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
 

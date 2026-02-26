@@ -11,6 +11,7 @@ MissionSequencer::MissionSequencer()
     mode_pub_ = this->create_publisher<std_msgs::msg::Bool>("/use_ik_mode", 10);
     target_pub_ = this->create_publisher<geometry_msgs::msg::Pose>("/waypoint_target", 10);
     marker_array_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("feasible_samples", 10);
+    door_lock_pub_ = this->create_publisher<std_msgs::msg::Bool>("/door_lock_trigger", 10);
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -201,6 +202,11 @@ void MissionSequencer::simple_timer()
 
 
         case SimpleState::PRE_PRESS: {
+            // LOCK THE DOOR ANCHORS NOW
+            std_msgs::msg::Bool lock_msg;
+            lock_msg.data = true;
+            door_lock_pub_->publish(lock_msg);
+            
             mode_msg.data = true; // Switch to IK mode
             mode_pub_->publish(mode_msg);
 

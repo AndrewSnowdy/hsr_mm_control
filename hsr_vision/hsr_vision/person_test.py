@@ -98,7 +98,7 @@ class HSRDetailedProfileNode(Node):
 
         # Draw Buttons from the last time we found them (No flicker!)
         if self.latest_button is not None:
-            self.process_results(self.latest_button, "button", (255, 0, 0), cv_image, detection_array)
+            self.process_results(self.latest_button, None, (255, 0, 0), cv_image, detection_array)
 
         self.detection_pub.publish(detection_array)
         t_post_vis = time.perf_counter()
@@ -143,18 +143,24 @@ class HSRDetailedProfileNode(Node):
 
     def process_results(self, results, label_prefix, color, img, det_array):
         boxes = results[0].boxes
+        names = results[0].names  # The dictionary of class names from the model
+        
         if boxes is not None:
             for box in boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
                 conf = float(box.conf[0].cpu().numpy())
+                cls_id = int(box.cls[0].cpu().numpy())
+                
+                # If prefix is None, use the actual YOLO class name (door, prox_button, etc.)
+                actual_label = label_prefix if label_prefix else names[cls_id]
                 
                 # Draw on image
                 cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(img, f"{label_prefix} {conf:.2f}", (x1, y1 - 10),
+                cv2.putText(img, f"{actual_label} {conf:.2f}", (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-                # Add to ROS message
-                det = self.create_detection_msg(label_prefix, conf, [x1, y1, x2, y2], det_array.header)
+                # Add to ROS message with the SPECIFIC class name
+                det = self.create_detection_msg(actual_label, conf, [x1, y1, x2, y2], det_array.header)
                 det_array.detections.append(det)
 
 def main(args=None):
