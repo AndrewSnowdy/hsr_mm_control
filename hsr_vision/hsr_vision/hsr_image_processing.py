@@ -1,349 +1,311 @@
+import math
+import numpy as np
+
 import rclpy
-from sensor_msgs.msg import LaserScan
 from rclpy.node import Node
+from rclpy.time import Time
+from rclpy.duration import Duration
+
+from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2DArray
 from visualization_msgs.msg import Marker, MarkerArray
-from sensor_msgs.msg import Image
-from geometry_msgs.msg import PoseStamped, PointStamped, Point
+from geometry_msgs.msg import PointStamped
+
 from cv_bridge import CvBridge
-import numpy as np
 import tf2_ros
 from tf2_geometry_msgs import do_transform_point
 
-class HSRSpatialLocalizer(Node):
+
+class HSRPersonTracker(Node):
     def __init__(self):
-        super().__init__('hsr_spatial_localizer')
+        super().__init__("hsr_person_tracker")
+
+        # --- Params (keep them hard-coded for simplicity) ---
+        self.depth_topic = "/rgb_PS1080_PrimeSense/depth_registered/image_raw"
+        self.det_topic = "/detected_objects"
+        self.base_frame = "base_link"
+
+        # --- Class-Specific Configs ---
+        self.class_configs = {
+            "person":      {"thresh": 1,  "dist": 0.8, "timeout": 0.5, "color": (0.2, 0.4, 1.0)}, # Blue
+            "prox_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (1.0, 0.0, 0.0)}, # Red
+            "push_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (0.0, 1.0, 0.0)}, # Green
+            "default":     {"thresh": 5,  "dist": 0.5, "timeout": 1.0, "color": (0.5, 0.5, 0.5)}
+}
+
+        # Intrinsics for the depth_registered image
+        self.fx = 525.0
+        self.fy = 525.0
+        self.cx = 320.0
+        self.cy = 240.0
+
+        # Association + smoothing
+        self.alpha_pos = 0.3
+        self.alpha_vel = 0.3 
+        # self.max_age_s = 1.0
+
+        # Visualization
+        self.pred_steps = 4
+        self.pred_dt = 0.2
+        self.marker_topic = "/visualization_marker"
+
+        # --- State ---
         self.bridge = CvBridge()
         self.latest_depth = None
-        
-        # Camera Intrinsics
-        self.fx, self.fy = 525.0, 525.0
-        self.cx, self.cy = 320.0, 240.0
+        self.latest_depth_is_mm = False
 
-        # TF2 Setup
+        self.tracks = {}  # id -> dict(pos=[x,y], vel=[vx,vy], last_t=float)
+        self.next_id = 0
+
+        # TF
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        self.create_subscription(Image, '/rgb_PS1080_PrimeSense/depth_registered/image_raw', self.depth_cb, 10)
-        self.create_subscription(Detection2DArray, '/detected_objects', self.detection_cb, 10)
-        self.latest_scan = None
-        self.create_subscription(LaserScan, '/hsrb/base_scan', self.scan_cb, 10)
+        # Pub/Sub
+        self.create_subscription(Image, self.depth_topic, self.depth_cb, 10)
+        self.create_subscription(Detection2DArray, self.det_topic, self.det_cb, 10)
+        self.marker_pub = self.create_publisher(MarkerArray, self.marker_topic, 10)
 
-        self.door_locked = False
-        self.create_subscription(Bool, '/door_lock_trigger', self.lock_cb, 10)
+        self.get_logger().info("HSRPersonTracker up. Tracking buttons and people!")
 
-        self.door_anchors = None
-        
-        self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
-        # We use MarkerArray for all visualizations now
-        self.marker_pub = self.create_publisher(MarkerArray, '/visualization_marker', 10)  
-
-        self.confirmed_objects = {}
-        self.stability_threshold = 5 
-        self.distance_threshold = 0.1
-
-        # --- Tracking State ---
-        self.active_people = {} 
-        self.person_id_counter = 0
-        self.max_disappearance_time = 1.0
-        self.alpha = 0.3 
-
-    def lock_cb(self, msg):
-        self.door_locked = msg.data
-        self.get_logger().info(f"Door Lock Status: {self.door_locked}")
-        
-    def scan_cb(self, msg):
-        self.latest_scan = msg
-
-    def depth_cb(self, msg):
+    def depth_cb(self, msg: Image) -> None:
         cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-        if cv_img.dtype == np.uint16:
+        self.latest_depth_is_mm = (cv_img.dtype == np.uint16)
+
+        # Store as float meters
+        if self.latest_depth_is_mm:
             self.latest_depth = cv_img.astype(np.float32) / 1000.0
         else:
             self.latest_depth = cv_img.astype(np.float32)
 
-    def detection_cb(self, msg):
+    def det_cb(self, msg: Detection2DArray) -> None:
         if self.latest_depth is None: return
-        detection_time = msg.header.stamp
+        cam_frame = msg.header.frame_id
+        now = self.get_clock().now().nanoseconds * 1e-9
 
+        # --- STEP 1: Project all detections into 3D base_link ---
+        observations = []
         for det in msg.detections:
-            u, v = int(det.bbox.center.position.x), int(det.bbox.center.position.y)
+            if not det.results: 
+                continue
             label = det.results[0].hypothesis.class_id.lower()
+            if label not in self.class_configs: 
+                continue
 
-            # --- 1. Get 3D Point from Depth Camera ---
-            h, w = self.latest_depth.shape[:2]
-            win = 2 
-            depth_patch = self.latest_depth[max(0,v-win):min(h,v+win+1), max(0,u-win):min(w,u+win+1)]
-            valid_depths = depth_patch[np.isfinite(depth_patch) & (depth_patch > 0)]
-            
-            if len(valid_depths) == 0: continue
-            z = float(np.median(valid_depths))
+            u, v = int(det.bbox.center.position.x), int(det.bbox.center.position.y)
+            z = self._stable_depth_at(u, v)
+            if z is None: 
+                continue
 
-            x_c = (u - self.cx) * z / self.fx
-            y_c = (v - self.cy) * z / self.fy
-            z_c = z
+            p_base = self._camera_point_to_base_link((u - self.cx)*z/self.fx, (v - self.cy)*z/self.fy, z, cam_frame)
+            if p_base:
+                observations.append({'pos': p_base, 'label': label})    
 
-            # --- 2. Routing Logic (FIXED INDENTATION) ---
-            # Group static items (door/buttons) for stability check
-            if "button" in label or "door" in label:
-                self.track_object_stability(x_c, y_c, z_c, label, msg.header.frame_id, detection_time, det)
-            elif "person" in label:
-                # Persons move; transform directly to robot frame without averaging
-                self.transform_to_robot_frame(x_c, y_c, z_c, "person", msg.header.frame_id, detection_time)
+        # --- STEP 2: Match to Tracks (Your previous logic) ---
+        used_obs_indices = set()
+        for tid, tr in self.tracks.items():
+            config = self.class_configs.get(tr['label'], self.class_configs["default"])
+            best_j= None
+            best_d = config["dist"]
 
-    def track_object_stability(self, x, y, z, label, frame_id, timestamp, det=None):
-        if label not in self.confirmed_objects:
-            self.confirmed_objects[label] = {'pos': [x, y, z], 'count': 1}
-            return
+            for j, obs in enumerate(observations):
+                if j in used_obs_indices or obs['label'] != tr['label']: continue
+                d = math.hypot(obs['pos'][0] - tr['pos'][0], obs['pos'][1] - tr['pos'][1])
+                if d < best_d:
+                    best_d = d
+                    best_j = j
 
-        prev = self.confirmed_objects[label]
-        dist = np.linalg.norm(np.array([x, y, z]) - np.array(prev['pos']))
-        
-        # If the new detection is close to our 'stable' point
-        if dist < self.distance_threshold:
-            prev['count'] += 1
-            # Smoothly update the internal position (80% old, 20% new)
-            prev['pos'] = (np.array(prev['pos']) * 0.8 + np.array([x, y, z]) * 0.2).tolist()
-            
-            # CHANGE: Use '>=' instead of '==' 
-            # This means after frame 5, EVERY new frame updates the goalposts
-            if prev['count'] >= self.stability_threshold:
-                if "button" in label:
-                    self.transform_to_robot_frame(prev['pos'][0], prev['pos'][1], prev['pos'][2], label, frame_id, timestamp)
-                elif "door" in label: # and self.latest_scan is not None:
-                    # Goalposts will now 'track' the door as you approach
-                    if not self.door_locked:
-                        self.process_door_goalposts(det, frame_id, timestamp)
-        else:
-            # If the object 'jumps' (drift or new object), reset the count
-            # but don't reset immediately—maybe it was just one bad frame?
-            # For now, a hard reset is safest for your mission.
-            self.confirmed_objects[label] = {'pos': [x, y, z], 'count': 1}
+            if best_j is not None:
+                used_obs_indices.add(best_j)
+                self._update_track(tid, observations[best_j]['pos'][0], observations[best_j]['pos'][1], observations[best_j]['pos'][2], now)
 
+        # --- STEP 3: New Tracks (With Proximity Filter) ---
+        for j, obs in enumerate(observations):
+            if j in used_obs_indices: 
+                continue
 
-    def update_person_tracking(self, rx, ry, timestamp):
-        """Euclidean matching to handle multiple people and velocity."""
-        now = timestamp.sec + timestamp.nanosec * 1e-9
-        best_id = None
-        min_dist = 0.8 # Threshold for matching the same person
-
-        for p_id, data in self.active_people.items():
-            dist = np.linalg.norm(np.array([rx, ry]) - np.array(data['pos']))
-            if dist < min_dist:
-                min_dist = dist
-                best_id = p_id
-
-        if best_id is not None:
-            data = self.active_people[best_id]
-            dt = now - data['last_seen']
-            
-            # --- APPLY ALPHA FILTER (Smoothing) ---
-            # Instead of jumping to [rx, ry], we move toward it slowly
-            smooth_x = (self.alpha * rx) + ((1.0 - self.alpha) * data['pos'][0])
-            smooth_y = (self.alpha * ry) + ((1.0 - self.alpha) * data['pos'][1])
-            
-            if dt > 0:
-                # Calculate velocity based on SMOOTHED positions for a stable trail
-                vx = (smooth_x - data['pos'][0]) / dt
-                vy = (smooth_y - data['pos'][1]) / dt
+            # Check if this "new" detection is too close to ANY existing track
+            # (regardless of whether that track was updated this frame)
+            is_duplicate = False
+            for tr in self.tracks.values():
+                # Use a small "minimum birth distance" (e.g., 0.5 meters)
+                # If it's closer than this to an existing track, it's likely a glitch
+                dist_to_existing = math.hypot(obs['pos'][0] - tr['pos'][0], 
+                                              obs['pos'][1] - tr['pos'][1])
                 
-                # Smooth the velocity too (it's often the jumpiest part)
-                prev_vx, prev_vy = data.get('vel', [0.0, 0.0])
-                data['vel'] = [
-                    (self.alpha * vx) + ((1.0 - self.alpha) * prev_vx),
-                    (self.alpha * vy) + ((1.0 - self.alpha) * prev_vy)
-                ]
+                if obs['label'] == tr['label'] and dist_to_existing < 0.5:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                self._create_track(obs['pos'][0], obs['pos'][1], obs['pos'][2], now, obs['label'])
 
-                speed = np.linalg.norm(data['vel'])
-                if speed < 0.1: # If moving slower than 10cm/s, assume they are still
-                    data['vel'] = [0.0, 0.0]
+        self._prune_tracks(now)
+        self._publish_markers()
 
-            data['pos'] = [smooth_x, smooth_y]
-            data['last_seen'] = now
+    # --------------------
+    # Tracking
+    # --------------------
+    def _create_track(self, x: float, y: float, z: float, t: float, label: str) -> None:
+        tid = self.next_id
+        self.next_id += 1
+        self.get_logger().info(f"Internal Track {tid} ({label}) created. Pending confirmation...")
+        self.tracks[tid] = {
+            "pos": [x, y, z],  # Added Z here
+            "vel": [0.0, 0.0],
+            "last_t": t,
+            "hits": 1,
+            "label": label
+        }
+
+    def _update_track(self, tid: int, x: float, y: float, z: float, t: float) -> None:
+        tr = self.tracks[tid]
+        px, py, pz = tr["pos"] # Retrieve Z
+        vx, vy = tr["vel"]
+        dt = max(1e-3, t - tr["last_t"])
+
+        # 1. EMA position smoothing (now including Z)
+        sx = self.alpha_pos * x + (1.0 - self.alpha_pos) * px
+        sy = self.alpha_pos * y + (1.0 - self.alpha_pos) * py
+        sz = self.alpha_pos * z + (1.0 - self.alpha_pos) * pz
+
+        # 2. Velocity calculation (Only useful for "person")
+        if tr["label"] == "person":
+            nvx = (sx - px) / dt
+            nvy = (sy - py) / dt
+            svx = self.alpha_vel * nvx + (1.0 - self.alpha_vel) * vx
+            svy = self.alpha_vel * nvy + (1.0 - self.alpha_vel) * vy
+            
+            if math.hypot(svx, svy) < 0.05:
+                svx, svy = 0.0, 0.0
+            tr["vel"] = [svx, svy]
         else:
-            best_id = self.person_id_counter
-            self.active_people[best_id] = {'pos': [rx, ry], 'last_seen': now, 'vel': [0.0, 0.0]}
-            self.person_id_counter += 1
+            tr["vel"] = [0.0, 0.0]
 
-        # Clean up lost tracks
-        self.active_people = {i: d for i, d in self.active_people.items() 
-                             if now - d['last_seen'] < self.max_disappearance_time}
-        
-        return best_id, self.active_people[best_id]['vel']
+        tr["pos"] = [sx, sy, sz] # Store smoothed 3D position
+        tr["hits"] += 1
+        tr["last_t"] = t
 
 
-    def transform_to_robot_frame(self, x, y, z, label, camera_frame, timestamp):
-        try:
-            point_camera = PointStamped()
-            point_camera.header.frame_id = camera_frame
-            point_camera.header.stamp = timestamp
-            point_camera.point.x, point_camera.point.y, point_camera.point.z = float(x), float(y), float(z)
+    def _prune_tracks(self, now: float) -> None:
+        to_del = []
+        for tid, tr in self.tracks.items():
+            # 1. Look up the specific timeout for this object type
+            config = self.class_configs.get(tr['label'], self.class_configs["default"])
+            max_age = config.get("timeout", 1.0) 
 
-            transform = self.tf_buffer.lookup_transform('base_link', camera_frame, timestamp, 
-                                                        timeout=rclpy.duration.Duration(seconds=0.1))
-            point_robot = do_transform_point(point_camera, transform)
-            rx, ry = float(point_robot.point.x), float(point_robot.point.y)
+            # 2. Check if the "Grace Period" has expired
+            if (now - tr["last_t"]) > max_age:
+                to_del.append(tid)
 
-            if "button" in label:
-                self.publish_goal(point_robot)
-            elif "door" in label:
-                # Orange disc for doors
-                self.publish_door_marker(rx, ry)
+        for tid in to_del:
+            del self.tracks[tid]
 
-        except Exception as e:
-            pass 
+    # --------------------
+    # Depth + TF helpers
+    # --------------------
+    def _stable_depth_at(self, u: int, v: int, win: int = 2) -> float | None:
+        h, w = self.latest_depth.shape[:2]
+        u0, u1 = max(0, u - win), min(w, u + win + 1)
+        v0, v1 = max(0, v - win), min(h, v + win + 1)
+        patch = self.latest_depth[v0:v1, u0:u1]
+        valid = patch[np.isfinite(patch) & (patch > 0.1)]
+        if valid.size == 0:
+            return None
+        return float(np.median(valid))
 
-
-    def publish_door_marker(self, x, y):
-        marker_array = MarkerArray()
-        marker = Marker()
-        marker.header.frame_id = "base_link"
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "doors"
-        marker.id = 0
-        marker.type = Marker.CYLINDER
-        marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = x, y, 0.0
-        marker.scale.x, marker.scale.y, marker.scale.z = 0.8, 0.8, 0.02
-        # Orange Color for doors
-        marker.color.r, marker.color.g, marker.color.b, marker.color.a = 1.0, 0.5, 0.0, 0.5
-        marker.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
-        marker_array.markers.append(marker)
-        self.marker_pub.publish(marker_array)
-
-
-    def publish_person_trails(self, x, y, label, person_id, velocity=[0.0, 0.0]):
-        marker_array = MarkerArray()
-        speed = np.linalg.norm(velocity)
-        num_prediction_steps = 5 
-        base_color = (0.2, 0.4, 1.0) # Blue
-        unique_ns = f"person_{person_id}"
-
-        for step in range(num_prediction_steps):
-            marker = Marker()
-            marker.header.frame_id = "base_link"
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = unique_ns
-            marker.id = step
-            marker.type = Marker.CYLINDER
-            marker.action = Marker.ADD
-            
-            vanishing_scale = 1.0 - (step / (num_prediction_steps + 2)) 
-            vanishing_alpha = 0.6 - (step * 0.1) 
-            
-            t_offset = step * 0.2
-            px = x + (velocity[0] * t_offset)
-            py = y + (velocity[1] * t_offset)
-            
-            marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = float(px), float(py), 0.01
-            marker.pose.orientation.w = 1.0
-            
-            radius = 0.3 * vanishing_scale
-            marker.scale.x, marker.scale.y, marker.scale.z = radius * 2, radius * 2, 0.02
-            
-            marker.color.r, marker.color.g, marker.color.b = base_color
-            marker.color.a = float(max(0.1, vanishing_alpha)) # Ensure it doesn't go below 0.1
-            marker.lifetime = rclpy.duration.Duration(seconds=0.3).to_msg()
-            marker_array.markers.append(marker)
-            
-        self.marker_pub.publish(marker_array)
-
-
-    def publish_goal(self, point_robot):
-        goal = PoseStamped()
-        goal.header = point_robot.header
-        goal.pose.position = point_robot.point
-        goal.pose.orientation.w = 1.0
-        self.goal_pub.publish(goal)
-
-
-    def process_door_goalposts(self, det, camera_frame, timestamp):
-        # 1. Get Image Edges (Goalpost pixels)
-        u_l = det.bbox.center.position.x - (det.bbox.size_x / 2.0)
-        u_r = det.bbox.center.position.x + (det.bbox.size_x / 2.0)
-        
-        # 2. Convert Pixels to Angles (Radians)
-        angle_l = -np.arctan2((u_l - self.cx), self.fx)
-        angle_r = -np.arctan2((u_r - self.cx), self.fx)
-
-        # 3. Get Physical Distance from LiDAR (Glass-Proof)
-        dist_l = self.get_scan_dist(angle_l)
-        dist_r = self.get_scan_dist(angle_r)
-
-        # 4. Project and Transform to Map Frame
-        # We transform to 'map' so if the robot turns, the posts stay in place
-        map_l = self.project_and_transform(dist_l, angle_l, camera_frame, timestamp)
-        map_r = self.project_and_transform(dist_r, angle_r, camera_frame, timestamp)
-
-        if map_l and map_r:
-            self.door_anchors = {'left': map_l, 'right': map_r}
-            self.publish_door_visuals(map_l, map_r)
-
-
-    def get_scan_dist(self, target_angle):
-        """Finds the LiDAR distance at a specific relative angle."""
-        if self.latest_scan is None: return 1.5
-        idx = int((target_angle - self.latest_scan.angle_min) / self.latest_scan.angle_increment)
-        idx = max(0, min(idx, len(self.latest_scan.ranges) - 1))
-        dist = self.latest_scan.ranges[idx]
-        return dist if (np.isfinite(dist) and dist > 0.1) else 2.0
-
-
-    def project_and_transform(self, dist, angle, from_frame, timestamp):
-        """Projects a polar coordinate to 3D and transforms to map frame."""
+    def _camera_point_to_base_link(self, x: float, y: float, z: float, cam_frame: str):
         try:
             p = PointStamped()
-            p.header.frame_id = from_frame
-            p.header.stamp = timestamp
-            p.point.x = dist * np.cos(angle)
-            p.point.y = dist * np.sin(angle)
-            p.point.z = 0.0
-            
-            # Transform to 'map' for global persistence
-            transform = self.tf_buffer.lookup_transform('map', from_frame, timestamp, 
-                                                        rclpy.duration.Duration(seconds=0.1))
-            return do_transform_point(p, transform).point
-        except:
+            p.header.frame_id = cam_frame
+            p.header.stamp = self.get_clock().now().to_msg()  # consistent with latest TF
+            p.point.x, p.point.y, p.point.z = float(x), float(y), float(z)
+
+            tf = self.tf_buffer.lookup_transform(
+                self.base_frame,
+                cam_frame,
+                Time(),  # latest TF for robustness
+                timeout=Duration(seconds=0.3),
+            )
+            out = do_transform_point(p, tf)
+            return (out.point.x, out.point.y, out.point.z)
+        except Exception as e:
+            self.get_logger().warn(f"TF fail {self.base_frame}<-{cam_frame}: {type(e).__name__}: {e}")
             return None
 
+    # --------------------
+    # Visualization
+    # --------------------
+    def _publish_markers(self) -> None:
+        now_msg = self.get_clock().now().to_msg()
+        full_array = MarkerArray()
 
-    def publish_door_visuals(self, p_l, p_r):
-        marker_array = MarkerArray()
-        
-        # Two tall Pillars (Red)
-        for i, pt in enumerate([p_l, p_r]):
+        # 1. Add a single "Clear All" marker at the start of the array
+        clear_marker = Marker()
+        clear_marker.action = Marker.DELETEALL
+        full_array.markers.append(clear_marker)
+
+        # 2. Append People markers to the list
+        self._add_people_to_array(full_array, now_msg)
+
+        # 3. Append Button markers to the list
+        self._add_buttons_to_array(full_array, now_msg)
+
+        # 4. Publish EVERYTHING once
+        if len(full_array.markers) > 1: # Only publish if there's more than just the clear marker
+            self.marker_pub.publish(full_array)
+
+    def _add_people_to_array(self, arr: MarkerArray, now_msg) -> None:
+        for tid, tr in self.tracks.items():
+            if tr["label"] != "person": continue
+            config = self.class_configs.get("person")
+            if tr["hits"] < config["thresh"]: continue
+
+            px, py, _ = tr["pos"]
+            vx, vy = tr.get("vel", [0.0, 0.0])
+
+            for step in range(self.pred_steps):
+                m = Marker()
+                m.header.frame_id, m.header.stamp = self.base_frame, now_msg
+                m.ns, m.id = f"person_{tid}", step
+                m.type, m.action = Marker.CYLINDER, Marker.ADD
+
+                t_offset = step * self.pred_dt
+                m.pose.position.x = float(px + vx * t_offset)
+                m.pose.position.y = float(py + vy * t_offset)
+                m.pose.position.z, m.pose.orientation.w = 0.01, 1.0
+
+                scale_factor = 1.0 - (step / (self.pred_steps + 1))
+                radius = 0.35 * scale_factor
+                m.scale.x = m.scale.y = radius * 2.0
+                m.scale.z = 0.02
+
+                m.color.r, m.color.g, m.color.b = config["color"]
+                m.color.a = float(max(0.1, 0.7 - 0.1 * step))
+                arr.markers.append(m)
+
+    def _add_buttons_to_array(self, arr: MarkerArray, now_msg) -> None:
+        for tid, tr in self.tracks.items():
+            if "button" not in tr["label"]: continue
+            config = self.class_configs.get(tr["label"], self.class_configs["default"])
+            if tr["hits"] < config["thresh"]: continue
+
             m = Marker()
-            m.header.frame_id = "map"
-            m.header.stamp = self.get_clock().now().to_msg()
-            m.ns = "door_frame"
-            m.id = i
-            m.type = Marker.CYLINDER
-            m.pose.position = pt
-            m.pose.position.z = 1.0 # 2m tall, centered at 1m
-            m.scale.x = m.scale.y = 0.1
-            m.scale.z = 2.0
-            m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.0, 0.0, 0.8
-            marker_array.markers.append(m)
+            m.header.frame_id, m.header.stamp = self.base_frame, now_msg
+            m.ns, m.id = f"button_{tid}", 0
+            m.type, m.action = Marker.SPHERE, Marker.ADD
 
-        # Safe Passage Center (Green Sphere)
-        center_marker = Marker()
-        center_marker.header.frame_id = "map"
-        center_marker.header.stamp = self.get_clock().now().to_msg()
-        center_marker.ns = "safe_passage"
-        center_marker.id = 0
-        center_marker.type = Marker.SPHERE
-        center_marker.pose.position.x = (p_l.x + p_r.x) / 2.0
-        center_marker.pose.position.y = (p_l.y + p_r.y) / 2.0
-        center_marker.pose.position.z = 0.0
-        center_marker.scale.x = center_marker.scale.y = center_marker.scale.z = 0.2
-        center_marker.color.r, center_marker.color.g, center_marker.color.b, center_marker.color.a = 0.0, 1.0, 0.0, 1.0
-        marker_array.markers.append(center_marker)
-
-        self.marker_pub.publish(marker_array)
-
+            m.pose.position.x, m.pose.position.y, m.pose.position.z = tr["pos"]
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = m.scale.z = 0.12
+            
+            m.color.r, m.color.g, m.color.b = config["color"]
+            m.color.a = 0.8
+            arr.markers.append(m)
 
 def main(args=None):
     rclpy.init(args=args)
-    node = HSRSpatialLocalizer()
+    node = HSRPersonTracker()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
@@ -352,327 +314,6 @@ def main(args=None):
         node.destroy_node()
         rclpy.shutdown()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
-# import rclpy
-# from rclpy.node import Node
-# from sensor_msgs.msg import LaserScan, Image
-# from vision_msgs.msg import Detection2DArray
-# from visualization_msgs.msg import Marker, MarkerArray
-# from geometry_msgs.msg import PointStamped, PoseStamped, Point
-# from std_msgs.msg import Bool
-# from cv_bridge import CvBridge
-# import numpy as np
-# import tf2_ros
-# from tf2_geometry_msgs import do_transform_point
-
-# class HSRSpatialLocalizer(Node):
-#     def __init__(self):
-#         super().__init__('hsr_spatial_localizer')
-#         self.bridge = CvBridge()
-#         self.latest_depth = None
-#         self.latest_scan = None
-        
-#         # Camera Intrinsics
-#         self.fx, self.fy = 525.0, 525.0
-#         self.cx, self.cy = 320.0, 240.0
-
-#         # TF2 Setup
-#         self.tf_buffer = tf2_ros.Buffer()
-#         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-
-#         # Subscriptions
-#         self.create_subscription(Image, '/rgb_PS1080_PrimeSense/depth_registered/image_raw', self.depth_cb, 10)
-#         self.create_subscription(Detection2DArray, '/detected_objects', self.detection_cb, 10)
-#         self.create_subscription(LaserScan, '/hsrb/base_scan', self.scan_cb, 10)
-#         self.create_subscription(Bool, '/door_lock_trigger', self.lock_cb, 10)
-
-#         # World Model Persistence
-#         self.world_pub = self.create_publisher(MarkerArray, '/vision/world_model', 10)
-#         self.registry = {}  
-#         self.door_id_counter = 0
-#         self.button_id_counter = 0
-#         self.person_id_counter = 0
-        
-#         self.door_locked = False
-#         self.ttl_static = 20.0  
-#         self.ttl_person = 1.5   
-        
-#         # Stability & Tracking Params
-#         self.confirmed_objects = {} 
-#         self.stability_threshold = 5
-#         self.dist_threshold = 0.8 
-#         self.alpha = 0.3 
-
-#         # 10Hz Heartbeat Timer
-#         self.timer = self.create_timer(0.1, self.timer_callback)
-
-#     # --- Callbacks ---
-
-#     def lock_cb(self, msg):
-#         self.door_locked = msg.data
-#         self.get_logger().info(f"World State Locked: {self.door_locked}")
-
-#     def scan_cb(self, msg):
-#         self.latest_scan = msg
-
-#     def depth_cb(self, msg):
-#         cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-#         if cv_img.dtype == np.uint16:
-#             self.latest_depth = cv_img.astype(np.float32) / 1000.0
-#         else:
-#             self.latest_depth = cv_img.astype(np.float32)
-
-#     # --- Core Logic ---
-
-#     def timer_callback(self):
-#         """Heartbeat: Publishes everything in the registry with current clock time."""
-#         now = self.get_clock().now().to_msg()
-#         master_array = MarkerArray()
-#         to_delete = []
-
-#         for obj_key, data in self.registry.items():
-#             ttl = self.ttl_person if "person" in obj_key else self.ttl_static
-#             if not self.door_locked and (now.sec - data['last_seen']) > ttl:
-#                 to_delete.append(obj_key)
-#                 continue
-            
-#             # Update markers with latest header timestamp to prevent RVIZ flickering
-#             for m in data['markers']:
-#                 m.header.stamp = now
-#             master_array.markers.extend(data['markers'])
-
-#         for key in to_delete:
-#             del self.registry[key]
-#         if master_array.markers:
-#             self.world_pub.publish(master_array)
-
-#     def detection_cb(self, msg):
-#         if self.latest_depth is None: return
-#         # Capture the sensor "Head" timestamp
-#         sensor_stamp = msg.header.stamp
-
-#         for det in msg.detections:
-#             label = det.results[0].hypothesis.class_id.lower()
-#             u, v = int(det.bbox.center.position.x), int(det.bbox.center.position.y)
-#             z = self.get_stable_depth(u, v)
-#             if z is None: continue
-
-#             # Transform to MAP frame using the exact sensor stamp
-#             x_c = (u - self.cx) * z / self.fx
-#             y_c = (v - self.cy) * z / self.fy
-#             p_map = self.transform_point(x_c, y_c, z, msg.header.frame_id, sensor_stamp)
-#             if p_map is None: continue
-
-#             if "button" in label or "door" in label:
-#                 self.process_static_object(p_map, label, det, msg.header.frame_id, sensor_stamp)
-#             elif "person" in label:
-#                 self.process_moving_person(p_map, sensor_stamp)
-
-#     # --- Processing Engines ---
-
-#     def process_static_object(self, p, label, det, camera_frame, stamp):
-#         best_id = self.find_in_registry(p, label)
-#         stab_key = best_id if best_id else f"new_{label}_{p.x:.1f}"
-#         if stab_key not in self.confirmed_objects:
-#             self.confirmed_objects[stab_key] = 0
-#         self.confirmed_objects[stab_key] += 1
-        
-#         if self.confirmed_objects[stab_key] >= self.stability_threshold:
-#             if "button" in label:
-#                 self.update_button_registry(p, best_id, stamp)
-#             elif "door" in label and not self.door_locked:
-#                 self.update_door_registry(det, camera_frame, stamp, best_id, p)
-
-#     def process_moving_person(self, p, stamp):
-#         person_key = self.find_in_registry(p, "person")
-#         now_wall = stamp.sec + stamp.nanosec * 1e-9
-        
-#         if person_key is None:
-#             person_key = f"person_{self.person_id_counter}"
-#             self.person_id_counter += 1
-#             smooth_pos = [p.x, p.y, p.z]
-#             velocity = [0.0, 0.0]
-#         else:
-#             data = self.registry[person_key]
-#             dt = now_wall - data['wall_t']
-#             smooth_x = (self.alpha * p.x) + ((1.0 - self.alpha) * data['pos'][0])
-#             smooth_y = (self.alpha * p.y) + ((1.0 - self.alpha) * data['pos'][1])
-#             smooth_pos = [smooth_x, smooth_y, p.z]
-
-#             if dt > 0:
-#                 vx = (smooth_x - data['pos'][0]) / dt
-#                 vy = (smooth_y - data['pos'][1]) / dt
-#                 prev_vel = data.get('vel', [0.0, 0.0])
-#                 velocity = [(self.alpha * vx) + ((1.0 - self.alpha) * prev_vel[0]),
-#                             (self.alpha * vy) + ((1.0 - self.alpha) * prev_vel[1])]
-#             else:
-#                 velocity = data.get('vel', [0.0, 0.0])
-
-#         self.registry[person_key] = {
-#             'pos': smooth_pos,
-#             'vel': velocity,
-#             'last_seen': stamp.sec,
-#             'wall_t': now_wall,
-#             'markers': self.create_person_trail_markers(smooth_pos, velocity, person_key, stamp)
-#         }
-
-#     # --- Registry Helpers ---
-
-#     def find_in_registry(self, p, label):
-#         for key, data in self.registry.items():
-#             if label in key:
-#                 dist = np.linalg.norm(np.array([p.x, p.y]) - np.array(data['pos'][:2]))
-#                 if dist < self.dist_threshold:
-#                     return key
-#         return None
-
-#     def update_button_registry(self, p, existing_key, stamp):
-#         bid = existing_key if existing_key else f"button_{self.button_id_counter}"
-#         if not existing_key: self.button_id_counter += 1
-        
-#         m = Marker()
-#         m.header.frame_id, m.header.stamp = "map", stamp
-#         m.ns, m.id = "buttons", int(bid.split('_')[1])
-#         m.type = Marker.SPHERE
-#         m.pose.position = p
-#         m.scale.x = m.scale.y = m.scale.z = 0.12
-#         m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 1.0, 0.0, 1.0
-        
-#         self.registry[bid] = {
-#             'pos': [p.x, p.y, p.z],
-#             'last_seen': stamp.sec,
-#             'markers': [m]
-#         }
-
-#     def update_door_registry(self, det, frame, stamp, existing_key, map_center):
-#         u_l = det.bbox.center.position.x - (det.bbox.size_x / 2.0)
-#         u_r = det.bbox.center.position.x + (det.bbox.size_x / 2.0)
-#         a_l, a_r = -np.arctan2((u_l-self.cx), self.fx), -np.arctan2((u_r-self.cx), self.fx)
-        
-#         map_l = self.project_and_transform(self.get_scan_dist(a_l), a_l, frame, stamp)
-#         map_r = self.project_and_transform(self.get_scan_dist(a_r), a_r, frame, stamp)
-        
-#         if not map_l or not map_r: return
-
-#         did_str = existing_key if existing_key else f"door_{self.door_id_counter}"
-#         if not existing_key: self.door_id_counter += 1
-#         did = int(did_str.split('_')[1])
-
-#         self.registry[did_str] = {
-#             'pos': [map_center.x, map_center.y, map_center.z],
-#             'last_seen': stamp.sec,
-#             'markers': self.create_door_marker_set(map_l, map_r, did, stamp)
-#         }
-
-#     # --- Visual Generators ---
-
-#     def create_door_marker_set(self, p_l, p_r, did, stamp):
-#         markers = []
-#         # Pillars (Tall Red Cylinders)
-#         for i, pt in enumerate([p_l, p_r]):
-#             m = Marker()
-#             m.header.frame_id, m.header.stamp = "map", stamp
-#             m.ns, m.id = f"door_{did}_pillars", i
-#             m.type = Marker.CYLINDER
-#             m.pose.position = pt
-#             m.pose.position.z = 1.0
-#             m.scale.x = m.scale.y = 0.06
-#             m.scale.z = 2.0
-#             m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.0, 0.0, 0.8
-#             markers.append(m)
-
-#         # Gap Disc (Floor Green Disc)
-#         mx, my = (p_l.x + p_r.x)/2.0, (p_l.y + p_r.y)/2.0
-#         gap = Marker()
-#         gap.header.frame_id, gap.header.stamp = "map", stamp
-#         gap.ns, gap.id = f"door_{did}_gap", 0
-#         gap.type = Marker.CYLINDER
-#         gap.pose.position.x, gap.pose.position.y, gap.pose.position.z = mx, my, 0.01
-#         gap.scale.x = gap.scale.y = 0.6
-#         gap.scale.z = 0.02
-#         gap.color.g, gap.color.a = 1.0, 0.7
-#         markers.append(gap)
-
-#         # Exit Normal (Blue Arrow)
-#         dx, dy = p_r.x - p_l.x, p_r.y - p_l.y
-#         dist = np.sqrt(dx**2 + dy**2)
-#         nx, ny = -dy/dist, dx/dist
-#         exit_m = Marker()
-#         exit_m.header.frame_id, exit_m.header.stamp = "map", stamp
-#         exit_m.ns, exit_m.id = f"door_{did}_exit", 0
-#         exit_m.type = Marker.ARROW
-#         exit_m.pose.position.x, exit_m.pose.position.y = mx + nx*1.5, my + ny*1.5
-#         yaw = np.atan2(ny, nx)
-#         exit_m.pose.orientation.z, exit_m.pose.orientation.w = np.sin(yaw/2.0), np.cos(yaw/2.0)
-#         exit_m.scale.x, exit_m.scale.y, exit_m.scale.z = 0.8, 0.1, 0.1
-#         exit_m.color.b, exit_m.color.a = 1.0, 1.0
-#         markers.append(exit_m)
-#         return markers
-
-#     def create_person_trail_markers(self, pos, vel, key, stamp):
-#         markers = []
-#         num_steps = 5 
-#         for step in range(num_steps):
-#             m = Marker()
-#             m.header.frame_id, m.header.stamp = "map", stamp
-#             m.ns, m.id = key, step
-#             m.type = Marker.CYLINDER
-#             t_offset = step * 0.2
-#             m.pose.position.x = pos[0] + (vel[0] * t_offset)
-#             m.pose.position.y = pos[1] + (vel[1] * t_offset)
-#             m.pose.position.z = 0.01
-#             v_scale = 1.0 - (step / (num_steps + 1))
-#             m.scale.x = m.scale.y = 0.6 * v_scale
-#             m.scale.z = 0.02
-#             m.color.r, m.color.g, m.color.b, m.color.a = 0.2, 0.4, 1.0, max(0.1, 0.6 - (step * 0.1))
-#             markers.append(m)
-#         return markers
-
-#     # --- Math Helpers ---
-
-#     def get_scan_dist(self, target_angle):
-#         if self.latest_scan is None:
-#             return 1.5
-#         inc = self.latest_scan.angle_increment
-#         if inc <= 0.0: return 2.0
-#         n = len(self.latest_scan.ranges)
-#         idx = int((target_angle - self.latest_scan.angle_min) / inc)
-#         idx = max(0, min(idx, n - 1))
-#         # Median window (7 beams for stability)
-#         window = 3
-#         start, end = max(0, idx - window), min(n - 1, idx + window)
-#         beams = self.latest_scan.ranges[start:end+1]
-#         valid = [d for d in beams if np.isfinite(d) and d > 0.1]
-#         return float(np.median(valid)) if valid else 2.0
-
-#     def get_stable_depth(self, u, v):
-#         h, w = self.latest_depth.shape[:2]
-#         win = 2
-#         patch = self.latest_depth[max(0,v-win):min(h,v+win+1), max(0,u-win):min(w,u+win+1)]
-#         valid = patch[np.isfinite(patch) & (patch > 0.1)]
-#         return float(np.median(valid)) if len(valid) > 0 else None
-
-#     def transform_point(self, x, y, z, from_frame, stamp):
-#         try:
-#             p = PointStamped()
-#             p.header.frame_id, p.header.stamp = from_frame, stamp
-#             p.point.x, p.point.y, p.point.z = x, y, z
-#             # Coordinate lookup in map frame using sensor timestamp
-#             return do_transform_point(p, self.tf_buffer.lookup_transform('map', from_frame, stamp, rclpy.duration.Duration(seconds=0.1))).point
-#         except: return None
-
-#     def project_and_transform(self, d, a, frame, stamp):
-#         return self.transform_point(d*np.cos(a), d*np.sin(a), 0.0, frame, stamp)
-
-# def main(args=None):
-#     rclpy.init(args=args)
-#     node = HSRSpatialLocalizer()
-#     try: rclpy.spin(node)
-#     except KeyboardInterrupt: pass
-#     finally:
-#         node.destroy_node()
-#         rclpy.shutdown()
-
-# if __name__ == '__main__':
-#     main()
