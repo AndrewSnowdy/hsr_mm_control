@@ -6,7 +6,7 @@ from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.duration import Duration
 
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, LaserScan
 from vision_msgs.msg import Detection2DArray
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import PointStamped
@@ -23,14 +23,15 @@ class HSRPersonTracker(Node):
         # --- Params (keep them hard-coded for simplicity) ---
         self.depth_topic = "/rgb_PS1080_PrimeSense/depth_registered/image_raw"
         self.det_topic = "/detected_objects"
+        self.scan_topic = "/scan"
         self.base_frame = "odom"
 
         # --- Class-Specific Configs ---
         self.class_configs = {
-            "person":      {"thresh": 2,  "dist": 0.8, "timeout": 0.5, "color": (0.2, 0.4, 1.0)}, # Blue
+            "person":      {"thresh": 2,  "dist": 1.2, "timeout": 0.5, "color": (0.2, 0.4, 1.0)}, # Blue
             "prox_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (1.0, 0.0, 0.0)}, # Red
             "push_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (0.0, 1.0, 0.0)}, # Green
-            "door":        {"thresh": 15,  "dist": 1.0, "timeout": 5.0,  "color": (1.0, 0.5, 0.0)}, # orange
+            "door":        {"thresh": 10,  "dist": 0.5, "timeout": 15.0,  "color": (1.0, 0.5, 0.0)}, # orange
             "default":     {"thresh": 5,  "dist": 0.5, "timeout": 1.0, "color": (0.5, 0.5, 0.5)}
 }
 
@@ -65,9 +66,15 @@ class HSRPersonTracker(Node):
         # Pub/Sub
         self.create_subscription(Image, self.depth_topic, self.depth_cb, 10)
         self.create_subscription(Detection2DArray, self.det_topic, self.det_cb, 10)
+        self.create_subscription(LaserScan, self.scan_topic, self.scan_cb, 10)
         self.marker_pub = self.create_publisher(MarkerArray, self.marker_topic, 10)
 
         self.get_logger().info("HSRPersonTracker up. Tracking buttons and people!")
+        # Create a diagnostic logger that runs every 2.0 seconds
+        self.create_timer(2.0, self._log_diagnostics)
+
+    def scan_cb(self, msg: LaserScan):
+        self.latest_scan = msg
 
     def depth_cb(self, msg: Image) -> None:
         cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
@@ -90,23 +97,79 @@ class HSRPersonTracker(Node):
             label = det.results[0].hypothesis.class_id.lower()
             if label not in self.class_configs: continue
 
+            # if label == "door":
+            #     # 1. Get 2D Edges (Bottom corners are more stable for floor centers)
+            #     u_l = int(det.bbox.center.position.x - det.bbox.size_x / 2.0)
+            #     u_r = int(det.bbox.center.position.x + det.bbox.size_x / 2.0)
+            #     v_bottom = int(det.bbox.center.position.y + det.bbox.size_y / 2.0)
+
+            #     # 2. Project Edges to 3D
+            #     z_l = self._stable_depth_at(u_l, v_bottom)
+            #     z_r = self._stable_depth_at(u_r, v_bottom)
+                
+            #     if z_l is None or z_r is None: continue
+
+            #     p_l = self._camera_point_to_base_link((u_l-self.cx)*z_l/self.fx, (v_bottom-self.cy)*z_l/self.fy, z_l, cam_frame)
+            #     p_r = self._camera_point_to_base_link((u_r-self.cx)*z_r/self.fx, (v_bottom-self.cy)*z_r/self.fy, z_r, cam_frame)
+
+            #     if p_l and p_r:
+            #         # 3. Calculate Floor Midpoint
+            #         mid_x = (p_l[0] + p_r[0]) / 2.0
+            #         mid_y = (p_l[1] + p_r[1]) / 2.0
+            #         mid_z = (p_l[2] + p_r[2]) / 2.0
+                    
+            #         observations.append({
+            #             'pos': (mid_x, mid_y, mid_z), 
+            #             'label': label,
+            #             'p_l': p_l, 'p_r': p_r, # Store raw edges for markers
+            #             'bbox': det.bbox, 'cam_frame': cam_frame
+            #         })
             if label == "door":
-                # 1. Get 2D Edges (Bottom corners are more stable for floor centers)
+                # 1. Get 2D Edges from the Bounding Box
+                yaw_offset = -0.13
+
                 u_l = int(det.bbox.center.position.x - det.bbox.size_x / 2.0)
                 u_r = int(det.bbox.center.position.x + det.bbox.size_x / 2.0)
                 v_bottom = int(det.bbox.center.position.y + det.bbox.size_y / 2.0)
 
-                # 2. Project Edges to 3D
+                # 2. Get Depth from Depth Map
                 z_l = self._stable_depth_at(u_l, v_bottom)
                 z_r = self._stable_depth_at(u_r, v_bottom)
                 
-                if z_l is None or z_r is None: continue
+                x_l_cam = (u_l - self.cx) / self.fx + yaw_offset
+                y_l_cam = (v_bottom - self.cy) / self.fy
+                
+                # Project Ray R with offset
+                x_r_cam = (u_r - self.cx) / self.fx + yaw_offset
+                y_r_cam = (v_bottom - self.cy) / self.fy
 
-                p_l = self._camera_point_to_base_link((u_l-self.cx)*z_l/self.fx, (v_bottom-self.cy)*z_l/self.fy, z_l, cam_frame)
-                p_r = self._camera_point_to_base_link((u_r-self.cx)*z_r/self.fx, (v_bottom-self.cy)*z_r/self.fy, z_r, cam_frame)
+                # Use a depth of 1.0 to create the 3D point in Camera Space
+                # We use the optical frame convention (Z-Forward, X-Right, Y-Down)
+                temp_z = 5.0
+                p_l_cam = [x_l_cam * (z_l or temp_z), y_l_cam * (z_l or temp_z), (z_l or temp_z)]
+                p_r_cam = [x_r_cam * (z_r or temp_z), y_r_cam * (z_r or temp_z), (z_r or temp_z)]
 
-                if p_l and p_r:
-                    # 3. Calculate Floor Midpoint
+                # --- THE FIX: Project in Camera Space first ---
+                # These are the 3D coordinates relative ONLY to the camera lens
+                # x_l_cam = (u_l - self.cx) * z_l / self.fx
+                # y_l_cam = (v_bottom - self.cy) * z_l / self.fy
+                # z_l_cam = z_l
+
+                # x_r_cam = (u_r - self.cx) * z_r / self.fx
+                # y_r_cam = (v_bottom - self.cy) * z_r / self.fy
+                # z_r_cam = z_r
+
+                # --- THE TF STEP: Transform from 'head_rgbd_sensor_link' to 'odom' ---
+                # This step automatically accounts for the head's pan/tilt rotation!
+                p_l_vis = self._transform_point(p_l_cam, cam_frame, self.base_frame)
+                p_r_vis = self._transform_point(p_r_cam, cam_frame, self.base_frame)
+
+                if p_l_vis and p_r_vis:
+                    # --- NEW REFINEMENT STEP ---
+                    # Use your new scan helper to "snap" these points to the physical wall edges
+                    p_l, p_r = self._refine_door_with_scan(p_l_vis, p_r_vis)
+                    
+                    # 4. Use the REFINED points for the final observation
                     mid_x = (p_l[0] + p_r[0]) / 2.0
                     mid_y = (p_l[1] + p_r[1]) / 2.0
                     mid_z = (p_l[2] + p_r[2]) / 2.0
@@ -114,15 +177,27 @@ class HSRPersonTracker(Node):
                     observations.append({
                         'pos': (mid_x, mid_y, mid_z), 
                         'label': label,
-                        'p_l': p_l, 'p_r': p_r, # Store raw edges for markers
+                        'p_l': p_l, 'p_r': p_r, 
                         'bbox': det.bbox, 'cam_frame': cam_frame
                     })
             else:
+                yaw_offset = -0.13
                 # Standard logic for people/buttons
                 u, v = int(det.bbox.center.position.x), int(det.bbox.center.position.y)
                 z = self._stable_depth_at(u, v)
                 if z is None: continue
-                p_base = self._camera_point_to_base_link((u-self.cx)*z/self.fx, (v-self.cy)*z/self.fy, z, cam_frame)
+
+                yaw_offset = -0.1 
+
+                # Project to 3D with the calibration offset
+                # We apply the offset to the horizontal (X) component
+                x_cam = ((u - self.cx) / self.fx + yaw_offset) * z
+                y_cam = ((v - self.cy) / self.fy) * z
+                z_cam = z
+
+                # Transform using the head's current TF
+                p_base = self._transform_point((x_cam, y_cam, z_cam), cam_frame, self.base_frame)
+
                 if p_base:
                     observations.append({'pos': p_base, 'label': label}) 
 
@@ -193,7 +268,7 @@ class HSRPersonTracker(Node):
             "p_l": p_l,  # Grouped Pillar Left
             "p_r": p_r   # Grouped Pillar Right
         }
-        self.get_logger().info(f"Created {label} track {tid} at [{x:.2f}, {y:.2f}]")
+        # self.get_logger().info(f"Created {label} track {tid} at [{x:.2f}, {y:.2f}]")
 
     def _update_track(self, tid: int, x: float, y: float, z: float, t: float, 
                       bbox=None, cam_frame=None, p_l=None, p_r=None) -> None:
@@ -207,6 +282,7 @@ class HSRPersonTracker(Node):
 
         # 2. Smooth the pillars (Door specific)
         if tr["label"] == "door" and p_l and p_r:
+            tr["vel"] = [0.0, 0.0]
 
             if isinstance(tr.get("p_l"), tuple):
                 tr["p_l"] = list(tr["p_l"])
@@ -285,6 +361,97 @@ class HSRPersonTracker(Node):
             self.get_logger().warn(f"TF fail {self.base_frame}<-{cam_frame}: {type(e).__name__}: {e}")
             return None
 
+    def _transform_point(self, pt, from_frame, to_frame):
+        try:
+            p = PointStamped()
+            p.header.frame_id = from_frame
+            # Using Time() here tells ROS to find the newest transform available
+            p.header.stamp = Time().to_msg() 
+            p.point.x, p.point.y, p.point.z = float(pt[0]), float(pt[1]), float(pt[2])
+
+            # We ask for Time() (latest) and add a small timeout to let the buffer fill
+            tf = self.tf_buffer.lookup_transform(
+                to_frame, 
+                from_frame, 
+                Time(), 
+                timeout=Duration(seconds=0.3)
+            )
+            out = do_transform_point(p, tf)
+            return (out.point.x, out.point.y, out.point.z)
+        except Exception:
+            return None
+
+    def _log_diagnostics(self) -> None:
+        if not self.tracks:
+            self.get_logger().info("--- No Active Tracks ---")
+            return
+
+        self.get_logger().info("--- Current Active Tracks ---")
+        self.get_logger().info(f"{'ID':<4} | {'Label':<12} | {'Hits':<5} | {'Status':<10}")
+        self.get_logger().info("-" * 40)
+
+        for tid, tr in sorted(self.tracks.items()):
+            label = tr['label']
+            hits = tr['hits']
+            thresh = self.class_configs.get(label, self.class_configs["default"])["thresh"]
+            
+            # Check if it's currently being visualized
+            status = "VISIBLE" if hits >= thresh else f"WAITING ({thresh-hits} left)"
+            
+            self.get_logger().info(f"{tid:<4} | {label:<12} | {hits:<5} | {status:<10}")
+
+    def _refine_door_with_scan(self, vision_p_l, vision_p_r):
+        if not hasattr(self, 'latest_scan') or self.latest_scan is None:
+            return vision_p_l, vision_p_r
+
+        scan = self.latest_scan
+        # Use the specific frame from the scan message
+        laser_frame = scan.header.frame_id 
+        
+        # Transform Vision (Odom) -> Laser Frame
+        p_l_laser = self._transform_point(vision_p_l, self.base_frame, laser_frame)
+        p_r_laser = self._transform_point(vision_p_r, self.base_frame, laser_frame)
+        
+        if not p_l_laser or not p_r_laser: return vision_p_l, vision_p_r
+
+        # Inset Math (unchanged, this part is solid)
+        dx, dy = p_r_laser[0] - p_l_laser[0], p_r_laser[1] - p_l_laser[1]
+        dist_total = math.hypot(dx, dy)
+        ux, uy = dx / dist_total, dy / dist_total
+        
+        inset = 0.05
+        p_l_in = [p_l_laser[0] + ux * inset, p_l_laser[1] + uy * inset]
+        p_r_in = [p_r_laser[0] - ux * inset, p_r_laser[1] - uy * inset]
+
+        def get_stable_dist(target_p):
+            angle = math.atan2(target_p[1], target_p[0])
+            idx = int(round((angle - scan.angle_min) / scan.angle_increment))
+
+            window_size = 2
+            start = max(0, idx - window_size)
+            end = min(len(scan.ranges), idx + window_size + 1)
+
+            pts = []
+            for k in range(start, end):
+                r = scan.ranges[k]
+                if 0.1 < r < 30.0 and np.isfinite(r):
+                    a = scan.angle_min + k * scan.angle_increment
+                    pts.append([r * math.cos(a), r * math.sin(a)])
+
+            if not pts:
+                return None
+
+            pts = np.array(pts, dtype=np.float32)
+            x = float(np.median(pts[:, 0]))
+            y = float(np.median(pts[:, 1]))
+            return [x, y, 0.0]
+
+        refined_l = get_stable_dist(p_l_in) or p_l_laser
+        refined_r = get_stable_dist(p_r_in) or p_r_laser
+
+        # Transform back to Odom
+        return (self._transform_point(refined_l, laser_frame, self.base_frame),
+                self._transform_point(refined_r, laser_frame, self.base_frame))
     # --------------------
     # Visualization
     # --------------------
