@@ -23,18 +23,19 @@ class HSRPersonTracker(Node):
         # --- Params (keep them hard-coded for simplicity) ---
         self.depth_topic = "/rgb_PS1080_PrimeSense/depth_registered/image_raw"
         self.det_topic = "/detected_objects"
-        self.base_frame = "base_link"
+        self.base_frame = "odom"
 
         # --- Class-Specific Configs ---
         self.class_configs = {
-            "person":      {"thresh": 1,  "dist": 0.8, "timeout": 0.5, "color": (0.2, 0.4, 1.0)}, # Blue
+            "person":      {"thresh": 2,  "dist": 0.8, "timeout": 0.5, "color": (0.2, 0.4, 1.0)}, # Blue
             "prox_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (1.0, 0.0, 0.0)}, # Red
             "push_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (0.0, 1.0, 0.0)}, # Green
+            "door":        {"thresh": 15,  "dist": 1.0, "timeout": 5.0,  "color": (1.0, 0.5, 0.0)}, # orange
             "default":     {"thresh": 5,  "dist": 0.5, "timeout": 1.0, "color": (0.5, 0.5, 0.5)}
 }
 
         # Intrinsics for the depth_registered image
-        self.fx = 525.0
+        self.fx = 525.0 
         self.fy = 525.0
         self.cx = 320.0
         self.cy = 240.0
@@ -86,20 +87,44 @@ class HSRPersonTracker(Node):
         # --- STEP 1: Project all detections into 3D base_link ---
         observations = []
         for det in msg.detections:
-            if not det.results: 
-                continue
             label = det.results[0].hypothesis.class_id.lower()
-            if label not in self.class_configs: 
-                continue
+            if label not in self.class_configs: continue
 
-            u, v = int(det.bbox.center.position.x), int(det.bbox.center.position.y)
-            z = self._stable_depth_at(u, v)
-            if z is None: 
-                continue
+            if label == "door":
+                # 1. Get 2D Edges (Bottom corners are more stable for floor centers)
+                u_l = int(det.bbox.center.position.x - det.bbox.size_x / 2.0)
+                u_r = int(det.bbox.center.position.x + det.bbox.size_x / 2.0)
+                v_bottom = int(det.bbox.center.position.y + det.bbox.size_y / 2.0)
 
-            p_base = self._camera_point_to_base_link((u - self.cx)*z/self.fx, (v - self.cy)*z/self.fy, z, cam_frame)
-            if p_base:
-                observations.append({'pos': p_base, 'label': label})    
+                # 2. Project Edges to 3D
+                z_l = self._stable_depth_at(u_l, v_bottom)
+                z_r = self._stable_depth_at(u_r, v_bottom)
+                
+                if z_l is None or z_r is None: continue
+
+                p_l = self._camera_point_to_base_link((u_l-self.cx)*z_l/self.fx, (v_bottom-self.cy)*z_l/self.fy, z_l, cam_frame)
+                p_r = self._camera_point_to_base_link((u_r-self.cx)*z_r/self.fx, (v_bottom-self.cy)*z_r/self.fy, z_r, cam_frame)
+
+                if p_l and p_r:
+                    # 3. Calculate Floor Midpoint
+                    mid_x = (p_l[0] + p_r[0]) / 2.0
+                    mid_y = (p_l[1] + p_r[1]) / 2.0
+                    mid_z = (p_l[2] + p_r[2]) / 2.0
+                    
+                    observations.append({
+                        'pos': (mid_x, mid_y, mid_z), 
+                        'label': label,
+                        'p_l': p_l, 'p_r': p_r, # Store raw edges for markers
+                        'bbox': det.bbox, 'cam_frame': cam_frame
+                    })
+            else:
+                # Standard logic for people/buttons
+                u, v = int(det.bbox.center.position.x), int(det.bbox.center.position.y)
+                z = self._stable_depth_at(u, v)
+                if z is None: continue
+                p_base = self._camera_point_to_base_link((u-self.cx)*z/self.fx, (v-self.cy)*z/self.fy, z, cam_frame)
+                if p_base:
+                    observations.append({'pos': p_base, 'label': label}) 
 
         # --- STEP 2: Match to Tracks (Your previous logic) ---
         used_obs_indices = set()
@@ -117,7 +142,10 @@ class HSRPersonTracker(Node):
 
             if best_j is not None:
                 used_obs_indices.add(best_j)
-                self._update_track(tid, observations[best_j]['pos'][0], observations[best_j]['pos'][1], observations[best_j]['pos'][2], now)
+                obs = observations[best_j]
+                self._update_track(tid, obs['pos'][0], obs['pos'][1], obs['pos'][2], now, 
+                                bbox=obs.get('bbox'), cam_frame=obs.get('cam_frame'), 
+                                p_l=obs.get('p_l'), p_r=obs.get('p_r'))
 
         # --- STEP 3: New Tracks (With Proximity Filter) ---
         for j, obs in enumerate(observations):
@@ -138,7 +166,10 @@ class HSRPersonTracker(Node):
                     break
             
             if not is_duplicate:
-                self._create_track(obs['pos'][0], obs['pos'][1], obs['pos'][2], now, obs['label'])
+                obs = observations[j]
+                self._create_track(obs['pos'][0], obs['pos'][1], obs['pos'][2], now, obs['label'],
+                                bbox=obs.get('bbox'), cam_frame=obs.get('cam_frame'), 
+                                p_l=obs.get('p_l'), p_r=obs.get('p_r'))
 
         self._prune_tracks(now)
         self._publish_markers()
@@ -146,43 +177,64 @@ class HSRPersonTracker(Node):
     # --------------------
     # Tracking
     # --------------------
-    def _create_track(self, x: float, y: float, z: float, t: float, label: str) -> None:
+    def _create_track(self, x: float, y: float, z: float, t: float, label: str, 
+                      bbox=None, cam_frame=None, p_l=None, p_r=None) -> None:
         tid = self.next_id
         self.next_id += 1
-        self.get_logger().info(f"Internal Track {tid} ({label}) created. Pending confirmation...")
+        
         self.tracks[tid] = {
-            "pos": [x, y, z],  # Added Z here
+            "pos": [x, y, z],
             "vel": [0.0, 0.0],
             "last_t": t,
             "hits": 1,
-            "label": label
+            "label": label,
+            "last_bbox": bbox,
+            "cam_frame": cam_frame,
+            "p_l": p_l,  # Grouped Pillar Left
+            "p_r": p_r   # Grouped Pillar Right
         }
+        self.get_logger().info(f"Created {label} track {tid} at [{x:.2f}, {y:.2f}]")
 
-    def _update_track(self, tid: int, x: float, y: float, z: float, t: float) -> None:
+    def _update_track(self, tid: int, x: float, y: float, z: float, t: float, 
+                      bbox=None, cam_frame=None, p_l=None, p_r=None) -> None:
         tr = self.tracks[tid]
-        px, py, pz = tr["pos"] # Retrieve Z
-        vx, vy = tr["vel"]
         dt = max(1e-3, t - tr["last_t"])
+        px, py, pz = list(tr["pos"])
+        # 1. Smooth the center position
+        tr["pos"][0] = self.alpha_pos * x + (1.0 - self.alpha_pos) * tr["pos"][0]
+        tr["pos"][1] = self.alpha_pos * y + (1.0 - self.alpha_pos) * tr["pos"][1]
+        tr["pos"][2] = self.alpha_pos * z + (1.0 - self.alpha_pos) * tr["pos"][2]
 
-        # 1. EMA position smoothing (now including Z)
-        sx = self.alpha_pos * x + (1.0 - self.alpha_pos) * px
-        sy = self.alpha_pos * y + (1.0 - self.alpha_pos) * py
-        sz = self.alpha_pos * z + (1.0 - self.alpha_pos) * pz
+        # 2. Smooth the pillars (Door specific)
+        if tr["label"] == "door" and p_l and p_r:
 
-        # 2. Velocity calculation (Only useful for "person")
-        if tr["label"] == "person":
-            nvx = (sx - px) / dt
-            nvy = (sy - py) / dt
-            svx = self.alpha_vel * nvx + (1.0 - self.alpha_vel) * vx
-            svy = self.alpha_vel * nvy + (1.0 - self.alpha_vel) * vy
+            if isinstance(tr.get("p_l"), tuple):
+                tr["p_l"] = list(tr["p_l"])
+            if isinstance(tr.get("p_r"), tuple):
+                tr["p_r"] = list(tr["p_r"])
+
+            if tr.get("p_l") is None: tr["p_l"] = list(p_l)
+            if tr.get("p_r") is None: tr["p_r"] = list(p_r)
+
+            # We smooth these so the door doesn't jump if a single depth pixel is noisy
+            for i in range(3):
+                tr["p_l"][i] = self.alpha_pos * p_l[i] + (1.0 - self.alpha_pos) * tr["p_l"][i]
+                tr["p_r"][i] = self.alpha_pos * p_r[i] + (1.0 - self.alpha_pos) * tr["p_r"][i]
             
-            if math.hypot(svx, svy) < 0.05:
-                svx, svy = 0.0, 0.0
-            tr["vel"] = [svx, svy]
-        else:
-            tr["vel"] = [0.0, 0.0]
+            tr["last_bbox"] = bbox
+            tr["cam_frame"] = cam_frame
 
-        tr["pos"] = [sx, sy, sz] # Store smoothed 3D position
+        if tr["label"] == "person":
+            nvx = (tr["pos"][0] - px) / dt
+            nvy = (tr["pos"][1] - py) / dt
+            
+            tr["vel"][0] = self.alpha_vel * nvx + (1.0 - self.alpha_vel) * tr["vel"][0]
+            tr["vel"][1] = self.alpha_vel * nvy + (1.0 - self.alpha_vel) * tr["vel"][1]
+            
+            if math.hypot(tr["vel"][0], tr["vel"][1]) < 0.05:
+                tr["vel"] = [0.0, 0.0]
+
+
         tr["hits"] += 1
         tr["last_t"] = t
 
@@ -245,11 +297,9 @@ class HSRPersonTracker(Node):
         clear_marker.action = Marker.DELETEALL
         full_array.markers.append(clear_marker)
 
-        # 2. Append People markers to the list
         self._add_people_to_array(full_array, now_msg)
-
-        # 3. Append Button markers to the list
         self._add_buttons_to_array(full_array, now_msg)
+        self._add_doors_to_array(full_array, now_msg)
 
         # 4. Publish EVERYTHING once
         if len(full_array.markers) > 1: # Only publish if there's more than just the clear marker
@@ -302,6 +352,53 @@ class HSRPersonTracker(Node):
             m.color.r, m.color.g, m.color.b = config["color"]
             m.color.a = 0.8
             arr.markers.append(m)
+
+    def _add_doors_to_array(self, arr: MarkerArray, now_msg) -> None:
+        for tid, tr in self.tracks.items():
+            if tr["label"] != "door" or tr["hits"] < self.class_configs["door"]["thresh"]:
+                continue
+
+            p_l, p_r = tr.get("p_l"), tr.get("p_r")
+            if not p_l or not p_r: continue
+
+            # Pillars
+            for i, pt in enumerate([p_l, p_r]):
+                m = Marker()
+                m.header.frame_id, m.header.stamp = self.base_frame, now_msg
+                m.ns, m.id = f"door_{tid}_pillars", i
+                m.type = Marker.CYLINDER
+                m.pose.position.x, m.pose.position.y, m.pose.position.z = pt[0], pt[1], 1.0
+                m.scale.x = m.scale.y = 0.08
+                m.scale.z = 2.0
+                m.color.r, m.color.a = 1.0, 0.8 # Red
+                arr.markers.append(m)
+
+            # Arrow Normal Calculation
+            dx, dy = p_r[0] - p_l[0], p_r[1] - p_l[1]
+            nx, ny = -dy, dx # Perpendicular vector
+            mag = math.hypot(nx, ny)
+            if mag > 0: nx /= mag; ny /= mag
+
+            # --- FLIP CHECK ---
+            # We want the arrow to point away from the robot. 
+            # If the robot is at (0,0) in base_link, we check the dot product.
+            # (In map frame, you'd need the robot's current pose, but usually, 
+            # for a door you just saw, 'away from camera' is a safe default)
+            arrow = Marker()
+            arrow.header.frame_id, arrow.header.stamp = self.base_frame, now_msg
+            arrow.ns, arrow.id = f"door_{tid}_arrow", 0
+            arrow.type, arrow.action = Marker.ARROW, Marker.ADD
+            
+            # Center of the door
+            mx, my = (p_l[0] + p_r[0])/2.0, (p_l[1] + p_r[1])/2.0
+            arrow.pose.position.x, arrow.pose.position.y, arrow.pose.position.z = mx, my, 0.1
+            
+            yaw = math.atan2(ny, nx)
+            arrow.pose.orientation.z = math.sin(yaw/2.0)
+            arrow.pose.orientation.w = math.cos(yaw/2.0)
+            arrow.scale.x, arrow.scale.y, arrow.scale.z = 0.6, 0.1, 0.1
+            arrow.color.r, arrow.color.g, arrow.color.b, arrow.color.a = 1.0, 1.0, 1.0, 1.0
+            arr.markers.append(arrow)
 
 def main(args=None):
     rclpy.init(args=args)
