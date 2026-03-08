@@ -42,22 +42,42 @@ MissionSequencer::MissionSequencer()
     RCLCPP_INFO(this->get_logger(), "MissionSequencer initialized. Waiting for /initial_mission_pose...");
 
     
-    mission_sub_ = this->create_subscription<geometry_msgs::msg::Pose>(
-        "/initial_mission_pose", 10, 
-        [this](const geometry_msgs::msg::Pose::SharedPtr msg) {
-            if (simple_state_ == SimpleState::MANUAL || simple_state_ == SimpleState::DONE) {
-                button_x = msg->position.x;
-                button_y = msg->position.y;
-                button_z = msg->position.z;
-                RCLCPP_INFO(this->get_logger(), "MISSION START: Target [%.2f, %.2f, %.2f]", 
-                            button_x, button_y, button_z);
-                simple_state_ = SimpleState::APPROACH;
+    // mission_sub_ = this->create_subscription<geometry_msgs::msg::Pose>(
+    //     "/initial_mission_pose", 10, 
+    //     [this](const geometry_msgs::msg::Pose::SharedPtr msg) {
+    //         if (simple_state_ == SimpleState::MANUAL || simple_state_ == SimpleState::DONE) {
+    //             button_x = msg->position.x;
+    //             button_y = msg->position.y;
+    //             button_z = msg->position.z;
+    //             RCLCPP_INFO(this->get_logger(), "MISSION START: Target [%.2f, %.2f, %.2f]", 
+    //                         button_x, button_y, button_z);
+    //             simple_state_ = SimpleState::APPROACH;
+    //         }
+    //     });
+
+
+
+    marker_sub_ = this->create_subscription<visualization_msgs::msg::MarkerArray>(
+    "/visualization_marker", 10,
+    [this](const visualization_msgs::msg::MarkerArray::SharedPtr msg) {
+        // Only look for a new mission if we are currently idle
+        if (simple_state_ == SimpleState::MANUAL || simple_state_ == SimpleState::APPROACH) {
+            for (const auto& marker : msg->markers) {
+                // Look for the specific namespace your Python node uses
+                if (marker.ns.find("button") != std::string::npos) {
+                    
+                    button_x = marker.pose.position.x;
+                    button_y = marker.pose.position.y;
+                    button_z = marker.pose.position.z;
+                    if (simple_state_ == SimpleState::MANUAL) {
+                        simple_state_ = SimpleState::APPROACH;
+                        RCLCPP_INFO(this->get_logger(), "Mission Triggered.");
+                    }
+                    return;
+                }
             }
-        });
-    // Button location (odom frame)
-    // button_x = 2.44;
-    // button_y = 0.0;
-    // button_z = 1.0;
+        }
+    });
 
     RCLCPP_INFO(this->get_logger(), "MissionSequencer started (MINIMAL).");
 }
@@ -174,6 +194,9 @@ void MissionSequencer::simple_timer()
         
         case SimpleState::APPROACH: {
             // Current base pose in map
+            mode_msg.data = false; // Non-IK mode
+            mode_pub_->publish(mode_msg);
+
             double rx, ry, rz;
             if (!get_tf_xyz(map_frame_, base_frame_, rx, ry, rz)) return;
 

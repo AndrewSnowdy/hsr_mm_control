@@ -6,6 +6,7 @@
 
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <visualization_msgs/msg/marker_array.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
@@ -82,6 +83,10 @@ private:
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
     nav_msgs::msg::OccupancyGrid latest_costmap_;
     bool have_costmap_ = false;
+
+
+    rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr marker_sub_;
+    bool mission_locked_ = false;
 
     // Cache the chosen standoff so it doesn't jump each tick
     geometry_msgs::msg::Pose cached_standoff_;

@@ -96,76 +96,72 @@ class HSRPersonTracker(Node):
         for det in msg.detections:
             label = det.results[0].hypothesis.class_id.lower()
             if label not in self.class_configs: continue
-
             # if label == "door":
-            #     # 1. Get 2D Edges (Bottom corners are more stable for floor centers)
-            #     u_l = int(det.bbox.center.position.x - det.bbox.size_x / 2.0)
-            #     u_r = int(det.bbox.center.position.x + det.bbox.size_x / 2.0)
+            #     # 1. Get 2D Edges from the Bounding Box
+            #     yaw_offset = -0.13
+            #     pixel_inset = 5
+
+            #     # 2. Calculate coordinates moved inward from the edges
+            #     u_l_safe = int(det.bbox.center.position.x - det.bbox.size_x / 2.0) + pixel_inset
+            #     u_r_safe = int(det.bbox.center.position.x + det.bbox.size_x / 2.0) - pixel_inset
             #     v_bottom = int(det.bbox.center.position.y + det.bbox.size_y / 2.0)
 
-            #     # 2. Project Edges to 3D
-            #     z_l = self._stable_depth_at(u_l, v_bottom)
-            #     z_r = self._stable_depth_at(u_r, v_bottom)
+            #     # 2. Get Depth from Depth Map
+            #     z_l = self._stable_depth_at(u_l_safe, v_bottom, win=6)
+            #     z_r = self._stable_depth_at(u_r_safe, v_bottom, win=6)
                 
-            #     if z_l is None or z_r is None: continue
+            #     x_l_cam = (u_l_safe - self.cx) / self.fx + yaw_offset
+            #     y_l_cam = (v_bottom - self.cy) / self.fy
+                
+            #     # Project Ray R with offset
+            #     x_r_cam = (u_r_safe - self.cx) / self.fx + yaw_offset
+            #     y_r_cam = (v_bottom - self.cy) / self.fy
 
-            #     p_l = self._camera_point_to_base_link((u_l-self.cx)*z_l/self.fx, (v_bottom-self.cy)*z_l/self.fy, z_l, cam_frame)
-            #     p_r = self._camera_point_to_base_link((u_r-self.cx)*z_r/self.fx, (v_bottom-self.cy)*z_r/self.fy, z_r, cam_frame)
+            #     # Use a depth of 1.0 to create the 3D point in Camera Space
+            #     # We use the optical frame convention (Z-Forward, X-Right, Y-Down)
+            #     if z_l is None:
+            #         z_l = self._get_lidar_dist_at_angle(ang_l)
+            #         if z_l == 5.0:
+            #             self.get_logger().warn(f"Door LEFT edge: No Depth or Lidar hit. Defaulting to 5.0m")
+            #     if z_r is None:
+            #         z_r = self._get_lidar_dist_at_angle(ang_r)
+            #         if z_r == 5.0:
+            #             self.get_logger().warn(f"Door RIGHT edge: No Depth or Lidar hit. Defaulting to 5.0m")
 
-            #     if p_l and p_r:
-            #         # 3. Calculate Floor Midpoint
-            #         mid_x = (p_l[0] + p_r[0]) / 2.0
-            #         mid_y = (p_l[1] + p_r[1]) / 2.0
-            #         mid_z = (p_l[2] + p_r[2]) / 2.0
-                    
-            #         observations.append({
-            #             'pos': (mid_x, mid_y, mid_z), 
-            #             'label': label,
-            #             'p_l': p_l, 'p_r': p_r, # Store raw edges for markers
-            #             'bbox': det.bbox, 'cam_frame': cam_frame
-            #         })
+            #     p_l_cam = [x_l_cam * (z_l or temp_z), y_l_cam * (z_l or temp_z), (z_l or temp_z)]
+            #     p_r_cam = [x_r_cam * (z_r or temp_z), y_r_cam * (z_r or temp_z), (z_r or temp_z)]
+
+            #     # --- THE TF STEP: Transform from 'head_rgbd_sensor_link' to 'odom' ---
+            #     # This step automatically accounts for the head's pan/tilt rotation!
+            #     p_l_vis = self._transform_point(p_l_cam, cam_frame, self.base_frame)
+            #     p_r_vis = self._transform_point(p_r_cam, cam_frame, self.base_frame)
             if label == "door":
-                # 1. Get 2D Edges from the Bounding Box
-                yaw_offset = -0.13
-
-                u_l = int(det.bbox.center.position.x - det.bbox.size_x / 2.0)
-                u_r = int(det.bbox.center.position.x + det.bbox.size_x / 2.0)
+                yaw_offset = -0.125
+                u_l = int(det.bbox.center.position.x - det.bbox.size_x / 2.0) + 5
+                u_r = int(det.bbox.center.position.x + det.bbox.size_x / 2.0) - 5
                 v_bottom = int(det.bbox.center.position.y + det.bbox.size_y / 2.0)
 
-                # 2. Get Depth from Depth Map
-                z_l = self._stable_depth_at(u_l, v_bottom)
-                z_r = self._stable_depth_at(u_r, v_bottom)
-                
-                x_l_cam = (u_l - self.cx) / self.fx + yaw_offset
-                y_l_cam = (v_bottom - self.cy) / self.fy
-                
-                # Project Ray R with offset
-                x_r_cam = (u_r - self.cx) / self.fx + yaw_offset
-                y_r_cam = (v_bottom - self.cy) / self.fy
+                # Calculate angles directly from pixels (no camera depth used here)
+                ang_l = math.atan2((u_l - self.cx), self.fx) + yaw_offset
+                ang_r = math.atan2((u_r - self.cx), self.fx) + yaw_offset
 
-                # Use a depth of 1.0 to create the 3D point in Camera Space
-                # We use the optical frame convention (Z-Forward, X-Right, Y-Down)
-                temp_z = 5.0
-                p_l_cam = [x_l_cam * (z_l or temp_z), y_l_cam * (z_l or temp_z), (z_l or temp_z)]
-                p_r_cam = [x_r_cam * (z_r or temp_z), y_r_cam * (z_r or temp_z), (z_r or temp_z)]
+                # Get the REAL distance from the Lidar at those angles
+                z_l_real = self._get_lidar_dist_at_angle(ang_l)
+                z_r_real = self._get_lidar_dist_at_angle(ang_r)
 
-                # --- THE FIX: Project in Camera Space first ---
-                # These are the 3D coordinates relative ONLY to the camera lens
-                # x_l_cam = (u_l - self.cx) * z_l / self.fx
-                # y_l_cam = (v_bottom - self.cy) * z_l / self.fy
-                # z_l_cam = z_l
+                if z_l_real == 5.0 or z_r_real == 5.0:
+                    self.get_logger().warn("Lidar missed the door frame; using default distance.")
 
-                # x_r_cam = (u_r - self.cx) * z_r / self.fx
-                # y_r_cam = (v_bottom - self.cy) * z_r / self.fy
-                # z_r_cam = z_r
+                # Project into 3D using Lidar distance
+                p_l_cam = [math.sin(ang_l) * z_l_real, ((v_bottom - self.cy) / self.fy) * z_l_real, math.cos(ang_l) * z_l_real]
+                p_r_cam = [math.sin(ang_r) * z_r_real, ((v_bottom - self.cy) / self.fy) * z_r_real, math.cos(ang_r) * z_r_real]
 
-                # --- THE TF STEP: Transform from 'head_rgbd_sensor_link' to 'odom' ---
-                # This step automatically accounts for the head's pan/tilt rotation!
+                # Transform and Refine as usual
                 p_l_vis = self._transform_point(p_l_cam, cam_frame, self.base_frame)
                 p_r_vis = self._transform_point(p_r_cam, cam_frame, self.base_frame)
 
                 if p_l_vis and p_r_vis:
-                    # --- NEW REFINEMENT STEP ---
+                    # --- NEW REFINEMENT STEP ---   
                     # Use your new scan helper to "snap" these points to the physical wall edges
                     p_l, p_r = self._refine_door_with_scan(p_l_vis, p_r_vis)
                     
@@ -381,25 +377,6 @@ class HSRPersonTracker(Node):
         except Exception:
             return None
 
-    def _log_diagnostics(self) -> None:
-        if not self.tracks:
-            self.get_logger().info("--- No Active Tracks ---")
-            return
-
-        self.get_logger().info("--- Current Active Tracks ---")
-        self.get_logger().info(f"{'ID':<4} | {'Label':<12} | {'Hits':<5} | {'Status':<10}")
-        self.get_logger().info("-" * 40)
-
-        for tid, tr in sorted(self.tracks.items()):
-            label = tr['label']
-            hits = tr['hits']
-            thresh = self.class_configs.get(label, self.class_configs["default"])["thresh"]
-            
-            # Check if it's currently being visualized
-            status = "VISIBLE" if hits >= thresh else f"WAITING ({thresh-hits} left)"
-            
-            self.get_logger().info(f"{tid:<4} | {label:<12} | {hits:<5} | {status:<10}")
-
     def _refine_door_with_scan(self, vision_p_l, vision_p_r):
         if not hasattr(self, 'latest_scan') or self.latest_scan is None:
             return vision_p_l, vision_p_r
@@ -452,6 +429,23 @@ class HSRPersonTracker(Node):
         # Transform back to Odom
         return (self._transform_point(refined_l, laser_frame, self.base_frame),
                 self._transform_point(refined_r, laser_frame, self.base_frame))
+
+    def _get_lidar_dist_at_angle(self, target_angle_rad):
+        if not hasattr(self, 'latest_scan') or self.latest_scan is None:
+            return 5.0
+
+        scan = self.latest_scan
+        # Calculate the index in the lidar array
+        idx = int((target_angle_rad - scan.angle_min) / scan.angle_increment)
+        
+        # Search a 10-beam window (approx 3 degrees) for the closest solid hit
+        window = 5
+        start, end = max(0, idx - window), min(len(scan.ranges), idx + window + 1)
+        valid = [r for r in scan.ranges[start:end] if 0.1 < r < 30.0]
+        
+        if not valid:
+            return 5.0
+        return float(np.median(valid))
     # --------------------
     # Visualization
     # --------------------
@@ -566,6 +560,26 @@ class HSRPersonTracker(Node):
             arrow.scale.x, arrow.scale.y, arrow.scale.z = 0.6, 0.1, 0.1
             arrow.color.r, arrow.color.g, arrow.color.b, arrow.color.a = 1.0, 1.0, 1.0, 1.0
             arr.markers.append(arrow)
+
+
+    def _log_diagnostics(self) -> None:
+        if not self.tracks:
+            self.get_logger().info("--- No Active Tracks ---")
+            return
+
+        self.get_logger().info("--- Current Active Tracks ---")
+        self.get_logger().info(f"{'ID':<4} | {'Label':<12} | {'Hits':<5} | {'Status':<10}")
+        self.get_logger().info("-" * 40)
+
+        for tid, tr in sorted(self.tracks.items()):
+            label = tr['label']
+            hits = tr['hits']
+            thresh = self.class_configs.get(label, self.class_configs["default"])["thresh"]
+            
+            # Check if it's currently being visualized
+            status = "VISIBLE" if hits >= thresh else f"WAITING ({thresh-hits} left)"
+            
+            self.get_logger().info(f"{tid:<4} | {label:<12} | {hits:<5} | {status:<10}")
 
 def main(args=None):
     rclpy.init(args=args)

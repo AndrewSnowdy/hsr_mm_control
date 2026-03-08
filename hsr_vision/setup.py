@@ -11,6 +11,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages',['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'models'), glob('models/*')),
     ],
     install_requires=['setuptools'],
@@ -22,9 +23,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            # This allows you to run: ros2 run hsr_vision hsr_vision_node
-            'hsr_vision_node = hsr_vision.hsr_image_processing:main',
-            'person_test = hsr_vision.person_test:main',
+            'process_node = hsr_vision.process_node:main',
+            'inference_node = hsr_vision.inference_node:main',
         ],
     },
 )
