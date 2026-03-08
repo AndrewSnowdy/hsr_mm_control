@@ -36,6 +36,9 @@ class HSRDetailedProfileNode(Node):
         self.button_interval = 1
 
         self.latest_button = None
+
+        self.latencies = []
+        self.create_timer(2.0, self._log_inference_diagnostics)
         
         # Camera Intrinsics
         self.fx, self.fy = 525.0, 525.0
@@ -59,25 +62,31 @@ class HSRDetailedProfileNode(Node):
         self.get_logger().info("Node Started: Detailed Timing Active")
 
     def rgb_callback(self, msg):
-        # --- TIMER START ---
-        self.frame_count += 1
+
         t_start_proc = time.perf_counter()
-        
-        # 1. NETWORK LATENCY
         t_now_ros = self.get_clock().now()
         t_msg_header = rclpy.time.Time.from_msg(msg.header.stamp)
         net_ms = (t_now_ros - t_msg_header).nanoseconds / 1e6
 
+        # --- TIMER START ---
+        self.frame_count += 1
+        # t_start_proc = time.perf_counter()
+        
+        # 1. NETWORK LATENCY
+        # t_now_ros = self.get_clock().now()
+        # t_msg_header = rclpy.time.Time.from_msg(msg.header.stamp)
+        # net_ms = (t_now_ros - t_msg_header).nanoseconds / 1e6
+
         # 2. DECODE
-        t_pre_decode = time.perf_counter()
+        # t_pre_decode = time.perf_counter()
         np_arr = np.frombuffer(msg.data, dtype=np.uint8)
         cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        t_post_decode = time.perf_counter()
+        # t_post_decode = time.perf_counter()
 
         if cv_image is None: return
 
         # 3. INFERENCE
-        t_pre_infer = time.perf_counter()
+        # t_pre_infer = time.perf_counter()
         # half=True is essential for your FP16 engine speed
         # results = self.model.track(cv_image, persist=True, classes=[0], verbose=False, half=True)
         human_results = self.human_model.predict(cv_image, classes=[0], verbose=False, half=True)
@@ -86,10 +95,10 @@ class HSRDetailedProfileNode(Node):
             # We save the results to a class variable so they persist
             self.latest_button = self.button_model.predict(cv_image, verbose=False, half=True)
             
-        t_post_infer = time.perf_counter()
+        # t_post_infer = time.perf_counter()
 
         # 4. DEPTH & VISUALS
-        t_pre_vis = time.perf_counter()
+        # t_pre_vis = time.perf_counter()
         detection_array = Detection2DArray()
         detection_array.header = msg.header
 
@@ -101,30 +110,41 @@ class HSRDetailedProfileNode(Node):
             self.process_results(self.latest_button, None, (255, 0, 0), cv_image, detection_array)
 
         self.detection_pub.publish(detection_array)
-        t_post_vis = time.perf_counter()
+        # t_post_vis = time.perf_counter()
 
         # 5. PUBLISH DEBUG
-        t_pre_pub = time.perf_counter()
+        # t_pre_pub = time.perf_counter()
         debug_msg = self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
         debug_msg.header = msg.header
         self.debug_pub.publish(debug_msg)
-        t_post_pub = time.perf_counter()
+        # t_post_pub = time.perf_counter()
 
         # --- TIMER END ---
-        t_end_proc = time.perf_counter()
+        # t_end_proc = time.perf_counter()
         
         # Calculate individual step durations in ms
-        decode_ms = (t_post_decode - t_pre_decode) * 1000
-        infer_ms = (t_post_infer - t_pre_infer) * 1000
-        vis_ms = (t_post_vis - t_pre_vis) * 1000
-        pub_ms = (t_post_pub - t_pre_pub) * 1000
-        total_proc_ms = (t_end_proc - t_start_proc) * 1000
+        # decode_ms = (t_post_decode - t_pre_decode) * 1000
+        # infer_ms = (t_post_infer - t_pre_infer) * 1000
+        # vis_ms = (t_post_vis - t_pre_vis) * 1000
+        # pub_ms = (t_post_pub - t_pre_pub) * 1000
+        # total_proc_ms = (t_end_proc - t_start_proc) * 1000
         
-        self.get_logger().info(
-            f"FPS: {1.0/(t_end_proc - t_start_proc):.1f} | "
-            f"NET: {net_ms:.1f}ms | DEC: {decode_ms:.1f}ms | INF: {infer_ms:.1f}ms | "
-            f"VIS: {vis_ms:.1f}ms | PUB: {pub_ms:.1f}ms | TOTAL_LATENCY: {net_ms + total_proc_ms:.1f}ms"
-        )
+        # self.get_logger().info(
+        #     f"FPS: {1.0/(t_end_proc - t_start_proc):.1f} | "
+        #     f"NET: {net_ms:.1f}ms | DEC: {decode_ms:.1f}ms | INF: {infer_ms:.1f}ms | "
+        #     f"VIS: {vis_ms:.1f}ms | PUB: {pub_ms:.1f}ms | TOTAL_LATENCY: {net_ms + total_proc_ms:.1f}ms"
+        # )
+
+        # --- LATENCY CALCULATION ---
+        t_end_proc = time.perf_counter()
+        total_proc_ms = (t_end_proc - t_start_proc) * 1000
+        total_latency = net_ms + total_proc_ms
+
+        self.latencies.append(total_latency)
+
+        # Immediate warning if things get slow
+        if total_latency > 200.0:
+            self.get_logger().warn(f"Latency Spike: {total_latency:.1f}ms")
 
     def create_detection_msg(self, class_id, conf, box, header):
         det = Detection2D()
@@ -162,6 +182,27 @@ class HSRDetailedProfileNode(Node):
                 # Add to ROS message with the SPECIFIC class name
                 det = self.create_detection_msg(actual_label, conf, [x1, y1, x2, y2], det_array.header)
                 det_array.detections.append(det)
+
+    def _log_inference_diagnostics(self):
+        if not self.latencies:
+            self.get_logger().info("--- Inference Dashboard: No Data ---")
+            return
+
+        avg_lat = sum(self.latencies) / len(self.latencies)
+        max_lat = max(self.latencies)
+        # Calculate current throughput
+        hz = 1000.0 / avg_lat if avg_lat > 0 else 0.0
+
+        self.get_logger().info(
+            f"\n--- Inference Dashboard (2s Window) ---\n"
+            f"Avg Total Latency: {avg_lat:.1f}ms\n"
+            f"Max Spike:         {max_lat:.1f}ms\n"
+            f"Current Rate:      {hz:.1f} Hz\n"
+            f"---------------------------------------"
+        )
+        
+        # Clear the list for the next 2-second window
+        self.latencies.clear()
 
 def main(args=None):
     rclpy.init(args=args)
