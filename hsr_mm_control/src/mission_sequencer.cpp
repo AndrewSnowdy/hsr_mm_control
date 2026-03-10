@@ -63,6 +63,9 @@ MissionSequencer::MissionSequencer()
         // Only look for a new mission if we are currently idle
         if (simple_state_ == SimpleState::MANUAL || simple_state_ == SimpleState::APPROACH) {
             for (const auto& marker : msg->markers) {
+
+                if (marker.ns.empty()) continue;
+
                 // Look for the specific namespace your Python node uses
                 if (marker.ns.find("button") != std::string::npos) {
                     
@@ -298,7 +301,7 @@ void MissionSequencer::simple_timer()
 
             // 2) Move "deeper" into the button. 
             // We change the offset from 0.15 (standoff) to 0.05 (pressing depth)
-            const double push_depth = 0.025; 
+            const double push_depth = 0.06; 
             target_pose.position.x = button_x - push_depth * std::cos(press_yaw);
             target_pose.position.y = button_y - push_depth * std::sin(press_yaw);
             

@@ -42,7 +42,8 @@ def generate_launch_description():
         "robot_pos_z": "0.0",
         "robot_rpy_Y": "0.0"
     }
-    my_world_path = os.path.join(pkg_hsr_mm_control, 'worlds', 'door.world')
+    # my_world_path = os.path.join(pkg_hsr_mm_control, 'worlds', 'door.world')
+    my_world_path = os.path.join(pkg_hsr_mm_control, 'worlds', 'full_sim.world')
 
     hsrb_gazebo_common = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(hsrb_gazebo_common_path),
@@ -74,13 +75,21 @@ def generate_launch_description():
         condition=IfCondition(show_ghost)
     )
 
-    # --- NEW: Door Button Bridge Script ---
-    door_button_bridge_path = os.path.join(pkg_hsr_mm_control, 'worlds', 'door_button_bridge.py')
+    # # --- NEW: Door Button Bridge Script ---
+    # door_button_bridge_path = os.path.join(pkg_hsr_mm_control, 'worlds', 'door_button_bridge.py')
+    
+    # door_button_bridge = ExecuteProcess(
+    #     cmd=['python3', door_button_bridge_path],
+    #     output='screen',
+    #     name='door_button_bridge'
+    # )
+
+    door_button_bridge_path = os.path.join(pkg_hsr_mm_control, 'worlds', 'full_sim_door_button_bridge.py')
     
     door_button_bridge = ExecuteProcess(
         cmd=['python3', door_button_bridge_path],
         output='screen',
-        name='door_button_bridge'
+        name='full_sim_door_button_bridge'
     )
 
     return LaunchDescription(declared_arguments + [
