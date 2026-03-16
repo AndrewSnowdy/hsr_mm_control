@@ -93,6 +93,8 @@ private:
     // --- Caching & Logic Control ---
     // standoff_yaw starts at -999.0 so we know it's uninitialized
     double standoff_yaw{-999.0}; 
+    double approach_start_dist = -1.0;
+    geometry_msgs::msg::Pose approach_start_pose;
     geometry_msgs::msg::Pose cached_standoff_;
     std::vector<geometry_msgs::msg::Pose> debug_feasible_poses_;
 

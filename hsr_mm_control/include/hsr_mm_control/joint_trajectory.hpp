@@ -74,6 +74,7 @@ private:
     rclcpp::Time last_t_{0, 0, RCL_ROS_TIME};
     double total_expected_time_;
     double current_time_s_;
+    double last_goal_vel_ = 0.0;
 
     std::map<std::string, QuinticSpline> splines_;
     std::vector<std::string> arm_joints_;

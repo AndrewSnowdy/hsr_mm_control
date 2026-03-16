@@ -4,6 +4,14 @@
 using namespace std::chrono_literals;
 
 
+geometry_msgs::msg::Pose interpolate_pose(const geometry_msgs::msg::Pose& start, const geometry_msgs::msg::Pose& end, double ratio) {
+    geometry_msgs::msg::Pose p = end;
+    p.position.x = start.position.x + ratio * (end.position.x - start.position.x);
+    p.position.y = start.position.y + ratio * (end.position.y - start.position.y);
+    return p;
+}
+
+
 MissionSequencer::MissionSequencer()
 : Node("mission_sequencer"),
     simple_state_(SimpleState::MANUAL)
@@ -190,16 +198,55 @@ void MissionSequencer::simple_timer()
             break;
         }
         
-        case SimpleState::APPROACH: {
-            auto final_goal = feasible_standoff_utils::compute_circular_target(button_x, button_y, robot->x, robot->y, 1.25);
+        // case SimpleState::APPROACH: {
+        //     auto final_goal = feasible_standoff_utils::compute_circular_target(button_x, button_y, robot->x, robot->y, 1.25);
             
-            publish_mission_goal(final_goal, false, 0.0, 0.0);
+        //     publish_mission_goal(final_goal, false, 0.0, 0.0);
 
-            if (base_close_xyw(*robot, final_goal, 0.10, 0.25)) {
-                RCLCPP_INFO(this->get_logger(), "Standoff reached -> PRE_PRESS");
-                simple_state_ = SimpleState::PRE_PRESS;
+        //     if (base_close_xyw(*robot, final_goal, 0.10, 0.25)) {
+        //         RCLCPP_INFO(this->get_logger(), "Standoff reached -> PRE_PRESS");
+        //         simple_state_ = SimpleState::PRE_PRESS;
+        //     }
+
+        //     break;
+        // }
+        case SimpleState::APPROACH: {
+            auto final_standoff = feasible_standoff_utils::compute_circular_target(button_x, button_y, robot->x, robot->y, 1.25);
+            
+            // 1. Initialize start pose and distance once
+            if (approach_start_dist < 0) {
+                approach_start_dist = std::hypot(final_standoff.position.x - robot->x, final_standoff.position.y - robot->y);
+                approach_start_pose = robot->pose; // Store the actual robot pose at start
             }
 
+            double current_dist = std::hypot(final_standoff.position.x - robot->x, final_standoff.position.y - robot->y);
+            double progress = 1.0 - (current_dist / approach_start_dist);
+            double heading = std::atan2(final_standoff.position.y - robot->y, final_standoff.position.x - robot->x);
+            double final_yaw = feasible_standoff_utils::get_pose_yaw(final_standoff);
+
+            geometry_msgs::msg::Pose current_waypoint;
+
+            // --- 3-WAYPOINT LEAP-FROG ---
+            if (progress < 0.24) {
+                // Target is physically 25% of the way there
+                current_waypoint = interpolate_pose(approach_start_pose, final_standoff, 0.26);
+                publish_mission_goal(current_waypoint, false, 0.225, heading);
+            } 
+            else if (progress < 0.74) {
+                // Target is physically 75% of the way there
+                current_waypoint = interpolate_pose(approach_start_pose, final_standoff, 0.76);
+                publish_mission_goal(current_waypoint, false, 0.25, heading);
+            } 
+            else {
+                // Target is the final standoff
+                current_waypoint = final_standoff;
+                publish_mission_goal(current_waypoint, false, 0.0, 0.0);
+            }
+
+            if (base_close_xyw(*robot, final_standoff, 0.10, 0.20)) {
+                approach_start_dist = -1.0; 
+                simple_state_ = SimpleState::PRE_PRESS;
+            }
             break;
         }
 
@@ -271,79 +318,89 @@ void MissionSequencer::simple_timer()
             break;
         }
 
-        case SimpleState::EXIT: {
-            auto door = get_complete_door(button_x, button_y);
-            if (!door) return;
-
-            double door_yaw = feasible_standoff_utils::get_pose_yaw(door->center);
-            double dx = robot->x - door->center.position.x;
-            double dy = robot->y - door->center.position.y;
-            double progress = dx * std::cos(door_yaw) + dy * std::sin(door_yaw);
-
-            double target_offset = 0.0;
-
-            // --- 4-STAGE RELAY LOGIC ---
-            // We update the target way BEFORE the robot reaches the current one
-            // to prevent the quintic "slow-down" phase.
-            if (progress < -0.3) {
-                target_offset = 0.2;  // Aim for threshold
-            } 
-            else if (progress < 0.1) {
-                target_offset = 0.6;  // Aim for middle of door
-            } 
-            else if (progress < 0.5) {
-                target_offset = 1.2;  // Aim for clearing the frame
-            } 
-            else {
-                target_offset = 1.8;  // The "Deep Clear" target
-            }
-
-            target_pose.position.x = door->center.position.x + target_offset * std::cos(door_yaw);
-            target_pose.position.y = door->center.position.y + target_offset * std::sin(door_yaw);
-            set_yaw(target_pose, door_yaw);
-            publish_mission_goal(target_pose, false, 0.0, 0.0);
-
-            // --- FINAL SUCCESS ---
-            // We only need to reach 1.2m to be fully clear of the swing
-            if (progress > 1.2) {
-                simple_state_ = SimpleState::DONE;
-                RCLCPP_INFO(this->get_logger(), "Sprint Complete. Final progress: %.2fm", progress);
-            }
-            break;
-        }
-
         // case SimpleState::EXIT: {
         //     auto door = get_complete_door(button_x, button_y);
         //     if (!door) return;
 
         //     double door_yaw = feasible_standoff_utils::get_pose_yaw(door->center);
-            
-        //     // 1. Calculate signed progress
         //     double dx = robot->x - door->center.position.x;
         //     double dy = robot->y - door->center.position.y;
         //     double progress = dx * std::cos(door_yaw) + dy * std::sin(door_yaw);
 
-        //     // 2. THE SPEED FIX: Keep the target CLOSE but MOVING.
-        //     // Instead of 3.0m (which makes a long T_dynamic), we use 0.5m.
-        //     // This forces T_dynamic to be short (~5s), making the spline much "steeper."
-        //     double carrot_offset = 0.5; 
-            
-        //     // We target a point 0.5m ahead of where the robot CURRENTLY is,
-        //     // but projected onto the door's center line.
-        //     target_pose.position.x = robot->x + carrot_offset * std::cos(door_yaw);
-        //     target_pose.position.y = robot->y + carrot_offset * std::sin(door_yaw);
-            
-        //     set_yaw(target_pose, door_yaw);
-        //     target_pub_->publish(target_pose);
+        //     double target_offset = 0.0;
 
-        //     // 3. EXIT CONDITION
+        //     // --- 4-STAGE RELAY LOGIC ---
+        //     // We update the target way BEFORE the robot reaches the current one
+        //     // to prevent the quintic "slow-down" phase.
+        //     if (progress < -0.3) {
+        //         target_offset = 0.2;  // Aim for threshold
+        //     } 
+        //     else if (progress < 0.1) {
+        //         target_offset = 0.6;  // Aim for middle of door
+        //     } 
+        //     else if (progress < 0.5) {
+        //         target_offset = 1.2;  // Aim for clearing the frame
+        //     } 
+        //     else {
+        //         target_offset = 1.8;  // The "Deep Clear" target
+        //     }
+
+        //     target_pose.position.x = door->center.position.x + target_offset * std::cos(door_yaw);
+        //     target_pose.position.y = door->center.position.y + target_offset * std::sin(door_yaw);
+        //     set_yaw(target_pose, door_yaw);
+        //     publish_mission_goal(target_pose, false, 0.0, 0.0);
+
+        //     // --- FINAL SUCCESS ---
+        //     // We only need to reach 1.2m to be fully clear of the swing
         //     if (progress > 1.2) {
         //         simple_state_ = SimpleState::DONE;
-        //         RCLCPP_INFO(this->get_logger(), "Clearance achieved.");
+        //         RCLCPP_INFO(this->get_logger(), "Sprint Complete. Final progress: %.2fm", progress);
         //     }
         //     break;
         // }
 
+        case SimpleState::EXIT: {
+            auto door = get_complete_door(button_x, button_y);
+            if (!door) return;
+
+            double door_yaw = feasible_standoff_utils::get_pose_yaw(door->center);
+            
+            // Calculate robot's progress ALONG the door's axis
+            // P < 0 means robot is in front of the door, P > 0 means robot has passed center
+            double dx = robot->x - door->center.position.x;
+            double dy = robot->y - door->center.position.y;
+            double p = dx * std::cos(door_yaw) + dy * std::sin(door_yaw);
+
+            geometry_msgs::msg::Pose target_pose = door->center;
+
+            // --- SPATIAL RELAY LOGIC ---
+            if (p < -0.1) {
+                // Still in front: Aim for the middle of the door frame
+                target_pose.position.x += 0.2 * std::cos(door_yaw);
+                target_pose.position.y += 0.2 * std::sin(door_yaw);
+                publish_mission_goal(target_pose, false, 0.25, door_yaw);
+            } 
+            else if (p < 0.4) {
+                // Inside the frame: Aim for the "Clearance" point (0.8m past center)
+                target_pose.position.x += 0.8 * std::cos(door_yaw);
+                target_pose.position.y += 0.8 * std::sin(door_yaw);
+                publish_mission_goal(target_pose, false, 0.3, door_yaw);
+            } 
+            else {
+                // Clearing: Aim for final "Deep Clear" point and SLOW DOWN
+                target_pose.position.x += 1.5 * std::cos(door_yaw);
+                target_pose.position.y += 1.5 * std::sin(door_yaw);
+                publish_mission_goal(target_pose, false, 0.0, door_yaw);
+            }
+
+            // --- EXIT CONDITION ---
+            // Successfully cleared if we are 1.2m past the door center
+            if (p > 1.2) {
+                RCLCPP_INFO(this->get_logger(), "Deep Clear achieved. EXIT -> DONE");
+                simple_state_ = SimpleState::DONE;
+            }
+            break;
+        }
         case SimpleState::DONE: {
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                                 "DONE (holding).");
@@ -355,7 +412,6 @@ void MissionSequencer::simple_timer()
 // ----------------------
 // Helper for Approach
 // ----------------------
-
 
 // visual for approach standoff
 // void MissionSequencer::publish_feasible_cloud(const std::vector<geometry_msgs::msg::Pose>& poses)

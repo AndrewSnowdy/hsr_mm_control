@@ -147,63 +147,73 @@ void JointTrajectoryController::odom_callback(const nav_msgs::msg::Odometry::Sha
 //     is_executing_ = true;
 // }
 
+
 void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointState::SharedPtr msg) {
-    // --- 1. DATA EXTRACTION ---
-    std::unordered_map<std::string, JointGoal> goals;
+    std::unordered_map<std::string, double> goal_pos;
+    std::unordered_map<std::string, double> goal_vel;
+
     for (size_t i = 0; i < msg->name.size(); ++i) {
-        goals[msg->name[i]].pos = msg->position[i];
-        // Extract velocity if provided (this is our target_vf)
+        goal_pos[msg->name[i]] = msg->position[i];
+        // Capture the target velocity sent by the sequencer
         if (msg->velocity.size() > i) {
-            goals[msg->name[i]].vel = msg->velocity[i];
+            goal_vel[msg->name[i]] = msg->velocity[i];
+        } else {
+            goal_vel[msg->name[i]] = 0.0;
         }
     }
 
-    // --- 2. DRIFT & FEASIBILITY CHECK ---
-    double goal_drift = std::hypot(goals["base_x"].pos - last_goal_x_, 
-                                   goals["base_y"].pos - last_goal_y_);
-    
-    if (goal_drift < 0.01 || (is_executing_ && goal_drift < 0.10)) return;
+    // 1. Check for Goal Drift or Velocity Change
+    double goal_drift = std::hypot(goal_pos["base_x"] - last_goal_x_, goal_pos["base_y"] - last_goal_y_);
+    double target_v_mag = std::hypot(goal_vel["base_x"], goal_vel["base_y"]);
+    double vel_change = std::abs(target_v_mag - last_goal_vel_);
 
-    // --- 3. DYNAMIC TIME CALCULATION ---
-    double dx = goals["base_x"].pos - current_base_x_;
-    double dy = goals["base_y"].pos - current_base_y_;
+    // Re-solve if we moved OR if the speed target changed (important for leap-frogging)
+    if (goal_drift < 0.01 && vel_change < 0.05) return;
+
+    // 2. Calculate Distance
+    double dx = goal_pos["base_x"] - current_base_x_;
+    double dy = goal_pos["base_y"] - current_base_y_;
     double L = std::hypot(dx, dy);
 
+    // 3. PHYSICS-BASED TIME (The "Juggling" Fix)
+    // We calculate T so the robot moves at a natural speed.
+    // We use the max of current speed or target speed to ensure we don't stall.
+    double v_start = std::hypot(current_vx_world_, current_vy_world_);
+    double v_avg = (v_start + target_v_mag) / 2.0;
+    v_avg = std::max(v_avg, 0.10); // Minimum 0.15m/s to avoid infinite time
+
+    // Golden Rule: Time = Distance / Speed
+    double T_kinematic = L / v_avg;
+
+    // Arm bottleneck
     double max_arm_delta = 0.0;
     for (const auto& name : arm_joints_) {
-        max_arm_delta = std::max(max_arm_delta, std::abs(goals[name].pos - current_arm_positions_[name]));
+        max_arm_delta = std::max(max_arm_delta, std::abs(goal_pos[name] - current_arm_positions_[name]));
     }
-
-    // Master Clock logic
-    double T_dynamic = std::max({L / 0.1, max_arm_delta / 0.1, 2.5}); 
-
-    // --- 4. SPLINE SOLVING (The Core Logic) ---
-    // Note how we now pass goals[name].vel as the 4th argument (target vf)
     
-    // Base X/Y/Yaw
-    splines_["base_x"].solve(current_base_x_, goals["base_x"].pos, current_vx_world_, 
-                             goals["base_x"].vel, 0, 0, T_dynamic);
-                             
-    splines_["base_y"].solve(current_base_y_, goals["base_y"].pos, current_vy_world_, 
-                             goals["base_y"].vel, 0, 0, T_dynamic);
-                             
-    splines_["base_yaw"].solve(current_yaw_, goals["base_yaw"].pos, current_vw_, 
-                               goals["base_yaw"].vel, 0, 0, T_dynamic);
+    // Final T: At least 1.5s for stability, but matches physics for the sprint
+    double T_dynamic = std::max({T_kinematic, max_arm_delta / 0.2, 1.5}); 
+    
+    // 4. Solve Splines
+    // Use the captured goal_vel for X, Y, and Yaw
+    splines_["base_x"].solve(current_base_x_, goal_pos["base_x"], current_vx_world_, goal_vel["base_x"], 0, 0, T_dynamic);
+    splines_["base_y"].solve(current_base_y_, goal_pos["base_y"], current_vy_world_, goal_vel["base_y"], 0, 0, T_dynamic);
+    splines_["base_yaw"].solve(current_yaw_, goal_pos["base_yaw"], current_vw_, goal_vel["base_yaw"], 0, 0, T_dynamic);
 
-    // Arms
     for (const auto& name : arm_joints_) {
-        double v0 = current_arm_velocities_[name];
-        splines_[name].solve(current_arm_positions_[name], goals[name].pos, v0, 
-                             goals[name].vel, 0, 0, T_dynamic);
+        splines_[name].solve(current_arm_positions_[name], goal_pos[name], current_arm_velocities_[name], goal_vel[name], 0, 0, T_dynamic);
     }
 
-    // --- 5. STATE RESET ---
-    last_goal_x_ = goals["base_x"].pos;
-    last_goal_y_ = goals["base_y"].pos;
+    // 5. Update state
+    last_goal_x_ = goal_pos["base_x"];
+    last_goal_y_ = goal_pos["base_y"];
+    last_goal_vel_ = target_v_mag;
     total_expected_time_ = T_dynamic;
     current_time_s_ = 0.0;
     last_t_ = this->now();
     is_executing_ = true;
+
+    RCLCPP_INFO(get_logger(), "New Spline: Dist=%.2f, T=%.2f, V_end=%.2f", L, T_dynamic, target_v_mag);
 }
 
 void JointTrajectoryController::timer_callback() {
