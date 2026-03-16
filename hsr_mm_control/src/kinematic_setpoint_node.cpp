@@ -25,24 +25,45 @@ FinalPoseNode::FinalPoseNode()
   },
   base_pos_x_(0.0),
   base_pos_y_(0.0),
-  base_yaw_(0.0)
+  base_yaw_(0.0),
+  target_vx_world_(0.0),
+  target_vy_world_(0.0),
+  target_vw_world_(0.0)
 {
 
-    target_sub_ = this->create_subscription<geometry_msgs::msg::Pose>(
-        "/waypoint_target", 10, 
-        [this](const geometry_msgs::msg::Pose::SharedPtr msg) {
-            current_target_ = *msg;
-            has_target_ = true;
-            // Optional: Trigger the IK solve immediately when a new point arrives
-        }
-    );
+    // target_sub_ = this->create_subscription<geometry_msgs::msg::Pose>(
+    //     "/waypoint_target", 10, 
+    //     [this](const geometry_msgs::msg::Pose::SharedPtr msg) {
+    //         current_target_ = *msg;
+    //         has_target_ = true;
+    //         // Optional: Trigger the IK solve immediately when a new point arrives
+    //     }
+    // );
 
-    mode_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-        "/use_ik_mode", 10, 
-        [this](const std_msgs::msg::Bool::SharedPtr msg) {
-            use_ik_mode_ = msg->data;
-            // RCLCPP_INFO(this->get_logger(), "Mode Switched: %s", 
-            //             use_ik_mode_ ? "IK MANIPULATION" : "TUCKED NAVIGATION");
+    // mode_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+    //     "/use_ik_mode", 10, 
+    //     [this](const std_msgs::msg::Bool::SharedPtr msg) {
+    //         use_ik_mode_ = msg->data;
+    //         // RCLCPP_INFO(this->get_logger(), "Mode Switched: %s", 
+    //         //             use_ik_mode_ ? "IK MANIPULATION" : "TUCKED NAVIGATION");
+    //     }
+    // );
+
+    mission_sub_ = this->create_subscription<hsr_mm_control::msg::MissionGoal>(
+        "/mission_command", 10, 
+        [this](const hsr_mm_control::msg::MissionGoal::SharedPtr msg) {
+            // 1. Update Target Pose
+            current_target_ = msg->target_pose;
+            
+            // 2. Update Velocities (for the Trapezoidal Splines)
+            target_vx_world_ = msg->target_velocity.linear.x;
+            target_vy_world_ = msg->target_velocity.linear.y;
+            target_vw_world_ = msg->target_velocity.angular.z;
+            
+            // 3. Update Mode
+            use_ik_mode_ = msg->use_ik_mode;
+            
+            has_target_ = true;
         }
     );
 
@@ -81,206 +102,6 @@ FinalPoseNode::FinalPoseNode()
     // 4. Main Loop
     timer_ = this->create_wall_timer(50ms, std::bind(&FinalPoseNode::tick, this));
 }
-
-// Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
-// {
-//     RCLCPP_INFO(get_logger(), "nq=%d nv=%d", model_.nq, model_.nv);
-//     RCLCPP_INFO(get_logger(), "joint[1]=%s idx_q=%d nq=%d idx_v=%d nv=%d",
-//                 model_.names[1].c_str(),
-//                 model_.joints[1].idx_q(), model_.joints[1].nq(),
-//                 model_.joints[1].idx_v(), model_.joints[1].nv());
-
-//     RCLCPP_INFO(get_logger(), "Solver Called! Target: %.2f, %.2f, %.2f", target_p.x(), target_p.y(), target_p.z());
-//     tf2::Quaternion q_target_tf(
-//         current_target_.orientation.x,
-//         current_target_.orientation.y,
-//         current_target_.orientation.z,
-//         current_target_.orientation.w);
-
-
-//     if (std::abs(q_target_tf.length() - 1.0) > 0.1) {
-//         RCLCPP_WARN(get_logger(), "Target Quaternion not normalized! Length: %.4f", q_target_tf.length());
-//     }
-
-//     q_target_tf.normalize();
-
-//     double r, p, target_yaw;
-//     tf2::Matrix3x3(q_target_tf).getRPY(r, p, target_yaw);
-
-//     // Warm start
-//     Eigen::VectorXd q = pinocchio::neutral(model_);
-//     q[0] = base_pos_x_;
-//     q[1] = base_pos_y_;
-//     q[2] = std::cos(base_yaw_);
-//     q[3] = std::sin(base_yaw_);
-
-
-
-//     RCLCPP_INFO(get_logger(), "Warm Start Base: X=%.2f, Y=%.2f, Yaw=%.2f", q[0], q[1], base_yaw_);
-
-//     pinocchio::normalize(model_, q);
-
-//     RCLCPP_INFO(get_logger(), "Warm Start normalized Base: X=%.2f, Y=%.2f, Yaw=%.2f", q[0], q[1], base_yaw_);
-
-
-//     // for (const auto& kv : q_map_) {
-//     //     if (!joint_name_to_id_.count(kv.first)) continue;
-//     //     const auto jid = joint_name_to_id_.at(kv.first);
-//     //     int idx = model_.joints[jid].idx_q();
-//     //     if (idx >= 0 && idx < q.size()) q[idx] = kv.second;
-//     // }
-//     for (const auto& kv : q_map_) {
-//         if (!joint_name_to_id_.count(kv.first)) continue;
-//         int jid = joint_name_to_id_.at(kv.first);
-        
-//         // Extract properties from the model for this specific joint ID
-//         int qidx = model_.joints[jid].idx_q();
-//         int nq   = model_.joints[jid].nq();
-
-//         // Check bounds and ensure it's a standard 1-DOF joint
-//         if (nq == 1 && qidx >= 0 && qidx < q.size()) {
-//             // First, set the position from the map
-//             q[qidx] = kv.second;
-//             // Second, clamp it to legal limits for safety
-//             q[qidx] = std::max(model_.lowerPositionLimit[qidx], 
-//                                std::min(model_.upperPositionLimit[qidx], q[qidx]));
-//         }
-//     }
-
-
-
-//     if (!std::isfinite(target_yaw)) {
-//         RCLCPP_ERROR(get_logger(), "Target Yaw is NaN! Orientation was: w=%.2f z=%.2f", 
-//                      current_target_.orientation.w, current_target_.orientation.z);
-//         return Eigen::VectorXd();
-//     }
-
-//     const double damping = 0.5;
-//     const double step_size = 0.1;
-//     const int max_iters = 500;
-//     pinocchio::Data data(model_);
-
-
-    
-//     RCLCPP_INFO(get_logger(), "starting IK");
-
-//     for (int i = 0; i < max_iters; ++i) {
-
-//         double norm_check = std::sqrt(q[2]*q[2] + q[3]*q[3]);
-//         if (std::abs(norm_check - 1.0) > 1e-4) {
-//              RCLCPP_ERROR(get_logger(), "ITER %d: Base not normalized BEFORE FK! Norm: %.6f", i, norm_check);
-//              pinocchio::normalize(model_, q);
-//         }
-
-//         pinocchio::normalize(model_, q);
-//         pinocchio::forwardKinematics(model_, data, q);
-//         pinocchio::updateFramePlacements(model_, data);
-        
-
-//         RCLCPP_INFO(get_logger(), "completed forwardKinematics");
-
-
-//         Eigen::Vector3d p = data.oMf[ee_fid_].translation();
-//         Eigen::Vector3d err = target_p - p;
-//         RCLCPP_INFO(get_logger(), "Initial EE Position: %.2f, %.2f, %.2f", p.x(), p.y(), p.z());
-
-//         if (i % 1 == 0) {
-//             RCLCPP_INFO(get_logger(), "IK iter %d |err|=%.4f  ee=[%.3f %.3f %.3f]",
-//                     i, err.norm(), p.x(), p.y(), p.z());
-//         }
-
-//         if (err.norm() < 1e-3) {
-//             RCLCPP_INFO(get_logger(), "IK converged in %d iters (|err|=%.6f)", i, err.norm());
-//             return q;
-//         }
-
-//         std::cout << "Model nv: " << model_.nv << " | Data J size: " << data.J.cols() << std::endl;
-
-//         Eigen::Matrix<double, 6, Eigen::Dynamic> J(6, model_.nv);
-//         J.setZero();
-//         pinocchio::computeFrameJacobian(model_, data, q, ee_fid_, pinocchio::LOCAL_WORLD_ALIGNED, J);
-
-//         RCLCPP_INFO(get_logger(), "got Jacobian");
-
-//         for (int col = 0; col < J.cols(); ++col) {
-//             if (!J.col(col).allFinite() || J.col(col).array().abs().maxCoeff() > 1e6) {
-//                 // If a column is exploding, zero it out so it doesn't poison the solver
-//                 J.col(col).setZero(); 
-//             }
-//         }
-
-//         J.col(2).setZero();
-
-
-//         std::cout << "--- [ITER " << i << "] JACOBIAN Matrix ---" << std::endl;
-//         std::cout << J << std::endl; 
-//         std::cout << "---------------------------------------" << std::endl;
-
-//         RCLCPP_INFO(get_logger(), "got Jacobian");
-
-                                    
-//         if (!J.allFinite()) {
-//             RCLCPP_ERROR(get_logger(), "ITER %d: Jacobian contains Non-Finite values!", i);
-//             return Eigen::VectorXd();
-//         }
-//         // if (!J.array().isFinite().all()) return Eigen::VectorXd();;
-
-
-//         Eigen::MatrixXd Jt = J.topRows<3>();           // 3 x nv
-//         Eigen::Matrix3d A  = Jt * Jt.transpose();      // 3 x 3
-//         A.diagonal().array() += damping * damping;
-
-//         Eigen::Vector3d alpha = A.ldlt().solve(err);   // 3 x 1
-//         Eigen::VectorXd dq    = Jt.transpose() * alpha; // nv x 1  <-- IMPORTANT
-
-//         if (!dq.allFinite()) {
-//             RCLCPP_ERROR(get_logger(), "ITER %d: Delta-Q (dq) is Non-Finite!", i);
-//             return Eigen::VectorXd();
-//         }
-//         // if (!dq.array().isFinite().all()) return Eigen::VectorXd();;
- 
-//         pinocchio::normalize(model_, q);
-
-//         try {
-//             q = pinocchio::integrate(model_, q, dq * step_size);
-//         } catch (...) {
-//             RCLCPP_ERROR(get_logger(), "ITER %d: pinocchio::integrate CRASHED!", i);
-//             return Eigen::VectorXd();
-//         }
-//         // q = pinocchio::integrate(model_, q, dq * step_size);
-
-//         q[2] = std::cos(target_yaw);
-//         q[3] = std::sin(target_yaw);
-
-//         // for (int j = 0; j < model_.nq; ++j) {
-//         //     if (j == 2 || j == 3) continue; 
-//         //     q[j] = std::max(model_.lowerPositionLimit[j], std::min(model_.upperPositionLimit[j], q[j]));
-//         // }
-//         for (pinocchio::JointIndex jid = 0; jid < (pinocchio::JointIndex)model_.njoints; ++jid) {
-//             int qidx = model_.joints[jid].idx_q();
-//             int nq   = model_.joints[jid].nq();
-
-//             // Check: Is it a standard joint? Is the index valid (not -1)? Is it within the vector size?
-//             if (nq == 1 && qidx >= 0 && qidx < q.size()) {
-//                 q[qidx] = std::clamp(q[qidx],
-//                                     model_.lowerPositionLimit[qidx],
-//                                     model_.upperPositionLimit[qidx]);
-//             }
-//         }
-
-//         pinocchio::normalize(model_, q);
-
-//         if (!q.allFinite()) {
-//             RCLCPP_ERROR(get_logger(), "ITER %d: q contains Non-Finite values after limits!", i);
-//             return Eigen::VectorXd();
-//         }
-//         // if (!q.allFinite()) return Eigen::VectorXd();;
-
-//     }
-
-//     RCLCPP_WARN(get_logger(), "IK timeout after %d iters", max_iters);
-//     return Eigen::VectorXd(); // failure
-// }
 
 
 Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
@@ -601,19 +422,23 @@ void FinalPoseNode::publishGhostPose(const Eigen::VectorXd &q_goal)
 
   sensor_msgs::msg::JointState js;
   js.header.stamp = now;
-
-  
   js.name = ghost_joint_names_;
   js.position = ghost_joint_pos_;
 
+  js.velocity.assign(js.name.size(), 0.0);
+
+
   js.name.push_back("base_x");
   js.position.push_back(q_goal[0]);
+  js.velocity.push_back(target_vx_world_);
 
   js.name.push_back("base_y");
   js.position.push_back(q_goal[1]);
+  js.velocity.push_back(target_vy_world_);
 
   js.name.push_back("base_yaw");
   js.position.push_back(std::atan2(q_goal[3], q_goal[2]));
+  js.velocity.push_back(target_vw_world_);
   
   ghost_joint_pub_->publish(js);
 }

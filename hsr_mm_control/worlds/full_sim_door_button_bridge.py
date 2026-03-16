@@ -35,7 +35,7 @@ def open_then_close():
     print("Doors open! Auto-closing in 5 seconds...")
 
     # Wait for doors to fully open (~2s) + hold open for 5s
-    threading.Event().wait(7.0)
+    threading.Event().wait(15.0)
 
     # Close both doors simultaneously
     print("Closing doors...")

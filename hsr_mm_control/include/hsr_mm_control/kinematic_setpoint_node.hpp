@@ -19,6 +19,8 @@
 #include <std_msgs/msg/bool.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include "hsr_mm_control/msg/mission_goal.hpp"
+
 enum class ControlState {IDLE, PLANNING, REACHED};
 
 class FinalPoseNode : public rclcpp::Node
@@ -42,8 +44,9 @@ private:
     // --- ROS Interface ---
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::Pose>::SharedPtr target_sub_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mode_sub_;
+    // rclcpp::Subscription<geometry_msgs::msg::Pose>::SharedPtr target_sub_;
+    // rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mode_sub_;
+    rclcpp::Subscription<hsr_mm_control::msg::MissionGoal>::SharedPtr mission_sub_;
     
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr ghost_joint_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
@@ -72,6 +75,11 @@ private:
     double base_pos_x_ = 0.0;
     double base_pos_y_ = 0.0;
     double base_yaw_ = 0.0;
+
+    double target_vx_world_ = 0.0;
+    double target_vy_world_ = 0.0;
+    double target_vw_world_ = 0.0;
+    
     bool odom_received_ = false;
     bool joints_received_ = false;
 

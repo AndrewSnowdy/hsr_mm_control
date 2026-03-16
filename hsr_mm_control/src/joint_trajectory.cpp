@@ -93,57 +93,116 @@ void JointTrajectoryController::odom_callback(const nav_msgs::msg::Odometry::Sha
     current_yaw_ = y;
 }
 
+// void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointState::SharedPtr msg) {
+//     std::unordered_map<std::string, double> goal;
+//     for (size_t i = 0; i < msg->name.size(); ++i) goal[msg->name[i]] = msg->position[i];
+
+//     // 1. Check for Goal Drift
+//     double goal_drift = std::hypot(goal["base_x"] - last_goal_x_, goal["base_y"] - last_goal_y_);
+//     if (goal_drift < 0.01) return;
+//     if (is_executing_ && goal_drift < 0.10) return;
+
+//     // 2. Calculate Base Requirements
+//     double dx = goal["base_x"] - current_base_x_;
+//     double dy = goal["base_y"] - current_base_y_;
+//     double L = std::hypot(dx, dy);
+
+//     // 3. NEW: Calculate Arm Requirements
+//     double max_arm_delta = 0.0;
+//     for (const auto& name : arm_joints_) {
+//         double delta = std::abs(goal[name] - current_arm_positions_[name]);
+//         if (delta > max_arm_delta) max_arm_delta = delta;
+//     }
+
+//     // 4. DYNAMIC TIME CALCULATION (Bottleneck-based)
+//     double base_time = L / 0.1;            // Assume 0.15 m/s cruise
+//     double arm_time  = max_arm_delta / 0.1; // Assume 0.2 rad/s cruise
+
+//     // Take the slowest component as the master clock, but keep a floor for smoothness
+//     double T_dynamic = std::max({base_time, arm_time, 2.5}); 
+    
+//     RCLCPP_INFO(get_logger(), "!!! NEW TARGET !!! Base Dist: %.3f m | Arm Move: %.3f rad | Time: %.2f s", 
+//                 L, max_arm_delta, T_dynamic);
+    
+//     last_goal_x_ = goal["base_x"];
+//     last_goal_y_ = goal["base_y"];
+//     total_expected_time_ = T_dynamic;
+
+//     // 5. Solve Splines (Base)
+//     splines_["base_x"].solve(current_base_x_, goal["base_x"], current_vx_world_, 0, 0, 0, T_dynamic);
+//     splines_["base_y"].solve(current_base_y_, goal["base_y"], current_vy_world_, 0, 0, 0, T_dynamic);
+//     splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], 0, 0, 0, 0, T_dynamic); // or current_vw_
+
+//     // 6. Solve Splines (Arm)
+//     for (const auto& name : arm_joints_) {
+//         double q0 = current_arm_positions_[name];
+//         double qf = goal.count(name) ? goal[name] : q0;
+//         double v0 = current_arm_velocities_[name]; // Use actual current velocity for C2 continuity
+        
+//         splines_[name].solve(q0, qf, v0, 0, 0, 0, T_dynamic);
+//     }
+
+//     last_t_ = this->now();
+//     current_time_s_ = 0.0;
+//     is_executing_ = true;
+// }
+
 void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointState::SharedPtr msg) {
-    std::unordered_map<std::string, double> goal;
-    for (size_t i = 0; i < msg->name.size(); ++i) goal[msg->name[i]] = msg->position[i];
+    // --- 1. DATA EXTRACTION ---
+    std::unordered_map<std::string, JointGoal> goals;
+    for (size_t i = 0; i < msg->name.size(); ++i) {
+        goals[msg->name[i]].pos = msg->position[i];
+        // Extract velocity if provided (this is our target_vf)
+        if (msg->velocity.size() > i) {
+            goals[msg->name[i]].vel = msg->velocity[i];
+        }
+    }
 
-    // 1. Check for Goal Drift
-    double goal_drift = std::hypot(goal["base_x"] - last_goal_x_, goal["base_y"] - last_goal_y_);
-    if (goal_drift < 0.01) return;
-    if (is_executing_ && goal_drift < 0.10) return;
+    // --- 2. DRIFT & FEASIBILITY CHECK ---
+    double goal_drift = std::hypot(goals["base_x"].pos - last_goal_x_, 
+                                   goals["base_y"].pos - last_goal_y_);
+    
+    if (goal_drift < 0.01 || (is_executing_ && goal_drift < 0.10)) return;
 
-    // 2. Calculate Base Requirements
-    double dx = goal["base_x"] - current_base_x_;
-    double dy = goal["base_y"] - current_base_y_;
+    // --- 3. DYNAMIC TIME CALCULATION ---
+    double dx = goals["base_x"].pos - current_base_x_;
+    double dy = goals["base_y"].pos - current_base_y_;
     double L = std::hypot(dx, dy);
 
-    // 3. NEW: Calculate Arm Requirements
     double max_arm_delta = 0.0;
     for (const auto& name : arm_joints_) {
-        double delta = std::abs(goal[name] - current_arm_positions_[name]);
-        if (delta > max_arm_delta) max_arm_delta = delta;
+        max_arm_delta = std::max(max_arm_delta, std::abs(goals[name].pos - current_arm_positions_[name]));
     }
 
-    // 4. DYNAMIC TIME CALCULATION (Bottleneck-based)
-    double base_time = L / 0.1;            // Assume 0.15 m/s cruise
-    double arm_time  = max_arm_delta / 0.1; // Assume 0.2 rad/s cruise
+    // Master Clock logic
+    double T_dynamic = std::max({L / 0.1, max_arm_delta / 0.1, 2.5}); 
 
-    // Take the slowest component as the master clock, but keep a floor for smoothness
-    double T_dynamic = std::max({base_time, arm_time, 2.5}); 
+    // --- 4. SPLINE SOLVING (The Core Logic) ---
+    // Note how we now pass goals[name].vel as the 4th argument (target vf)
     
-    RCLCPP_INFO(get_logger(), "!!! NEW TARGET !!! Base Dist: %.3f m | Arm Move: %.3f rad | Time: %.2f s", 
-                L, max_arm_delta, T_dynamic);
-    
-    last_goal_x_ = goal["base_x"];
-    last_goal_y_ = goal["base_y"];
-    total_expected_time_ = T_dynamic;
+    // Base X/Y/Yaw
+    splines_["base_x"].solve(current_base_x_, goals["base_x"].pos, current_vx_world_, 
+                             goals["base_x"].vel, 0, 0, T_dynamic);
+                             
+    splines_["base_y"].solve(current_base_y_, goals["base_y"].pos, current_vy_world_, 
+                             goals["base_y"].vel, 0, 0, T_dynamic);
+                             
+    splines_["base_yaw"].solve(current_yaw_, goals["base_yaw"].pos, current_vw_, 
+                               goals["base_yaw"].vel, 0, 0, T_dynamic);
 
-    // 5. Solve Splines (Base)
-    splines_["base_x"].solve(current_base_x_, goal["base_x"], current_vx_world_, 0, 0, 0, T_dynamic);
-    splines_["base_y"].solve(current_base_y_, goal["base_y"], current_vy_world_, 0, 0, 0, T_dynamic);
-    splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], 0, 0, 0, 0, T_dynamic); // or current_vw_
-
-    // 6. Solve Splines (Arm)
+    // Arms
     for (const auto& name : arm_joints_) {
-        double q0 = current_arm_positions_[name];
-        double qf = goal.count(name) ? goal[name] : q0;
-        double v0 = current_arm_velocities_[name]; // Use actual current velocity for C2 continuity
-        
-        splines_[name].solve(q0, qf, v0, 0, 0, 0, T_dynamic);
+        double v0 = current_arm_velocities_[name];
+        splines_[name].solve(current_arm_positions_[name], goals[name].pos, v0, 
+                             goals[name].vel, 0, 0, T_dynamic);
     }
 
-    last_t_ = this->now();
+    // --- 5. STATE RESET ---
+    last_goal_x_ = goals["base_x"].pos;
+    last_goal_y_ = goals["base_y"].pos;
+    total_expected_time_ = T_dynamic;
     current_time_s_ = 0.0;
+    last_t_ = this->now();
     is_executing_ = true;
 }
 

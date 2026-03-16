@@ -97,5 +97,5 @@ def generate_launch_description():
         hsrb_gazebo_common,
         kinematic_setpoint_node,
         ghost_rsp,
-        door_button_bridge  # Add this line
+        door_button_bridge 
     ])

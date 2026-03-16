@@ -14,6 +14,12 @@
  * Computes a 5th-order polynomial for smooth motion
  */
 
+ struct JointGoal {
+    double pos = 0.0;
+    double vel = 0.0; // Our new target final velocity
+};
+
+
 class QuinticSpline {
     public:
     QuinticSpline() = default;

@@ -1,5 +1,5 @@
 #include "hsr_mm_control/mission_sequencer.hpp"
-#include "hsr_mm_control/utils.hpp"
+#include "hsr_mm_control/utils_feasible_points.hpp"
 
 using namespace std::chrono_literals;
 
@@ -8,24 +8,17 @@ MissionSequencer::MissionSequencer()
 : Node("mission_sequencer"),
     simple_state_(SimpleState::MANUAL)
 {
-    mode_pub_ = this->create_publisher<std_msgs::msg::Bool>("/use_ik_mode", 10);
-    target_pub_ = this->create_publisher<geometry_msgs::msg::Pose>("/waypoint_target", 10);
-    marker_array_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("feasible_samples", 10);
+    // mode_pub_ = this->create_publisher<std_msgs::msg::Bool>("/use_ik_mode", 10);
+    // target_pub_ = this->create_publisher<geometry_msgs::msg::Pose>("/waypoint_target", 10);
+    // marker_array_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("feasible_samples", 10);
+    mission_pub_ = this->create_publisher<hsr_mm_control::msg::MissionGoal>("/mission_command", 10);
+
     door_lock_pub_ = this->create_publisher<std_msgs::msg::Bool>("/door_lock_trigger", 10);
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
     timer_ = this->create_wall_timer(100ms, std::bind(&MissionSequencer::simple_timer, this));
-
-    // We can keep a simplified Joy sub just as an Emergency Stop
-    joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
-        "/joy", 10, [this](const sensor_msgs::msg::Joy::SharedPtr msg) {
-            if (msg->buttons[1] == 1) { // 'B' button
-                RCLCPP_ERROR(this->get_logger(), "EMERGENCY STOP: Reverting to MANUAL");
-                simple_state_ = SimpleState::MANUAL;
-            }
-        });
 
     auto costmap_qos = rclcpp::QoS(rclcpp::KeepLast(1))
         .reliable()
@@ -41,184 +34,168 @@ MissionSequencer::MissionSequencer()
 
     RCLCPP_INFO(this->get_logger(), "MissionSequencer initialized. Waiting for /initial_mission_pose...");
 
-    
-    // mission_sub_ = this->create_subscription<geometry_msgs::msg::Pose>(
-    //     "/initial_mission_pose", 10, 
-    //     [this](const geometry_msgs::msg::Pose::SharedPtr msg) {
-    //         if (simple_state_ == SimpleState::MANUAL || simple_state_ == SimpleState::DONE) {
-    //             button_x = msg->position.x;
-    //             button_y = msg->position.y;
-    //             button_z = msg->position.z;
-    //             RCLCPP_INFO(this->get_logger(), "MISSION START: Target [%.2f, %.2f, %.2f]", 
-    //                         button_x, button_y, button_z);
-    //             simple_state_ = SimpleState::APPROACH;
-    //         }
-    //     });
-
-
 
     marker_sub_ = this->create_subscription<visualization_msgs::msg::MarkerArray>(
     "/visualization_marker", 10,
     [this](const visualization_msgs::msg::MarkerArray::SharedPtr msg) {
-        // Only look for a new mission if we are currently idle
-        if (simple_state_ == SimpleState::MANUAL || simple_state_ == SimpleState::APPROACH) {
-            for (const auto& marker : msg->markers) {
-
-                if (marker.ns.empty()) continue;
-
-                // Look for the specific namespace your Python node uses
-                if (marker.ns.find("button") != std::string::npos) {
-                    
-                    button_x = marker.pose.position.x;
-                    button_y = marker.pose.position.y;
-                    button_z = marker.pose.position.z;
-                    if (simple_state_ == SimpleState::MANUAL) {
-                        simple_state_ = SimpleState::APPROACH;
-                        RCLCPP_INFO(this->get_logger(), "Mission Triggered.");
-                    }
-                    return;
-                }
-            }
-        }
+        // Just save the data; let the functions do the heavy lifting
+        latest_markers_ = *msg; 
     });
 
-    RCLCPP_INFO(this->get_logger(), "MissionSequencer started (MINIMAL).");
+    RCLCPP_INFO(this->get_logger(), "MissionSequencer started.");
+}
+// --------------
+// Publish Parser
+// --------------
+void MissionSequencer::publish_mission_goal(const geometry_msgs::msg::Pose& pose, bool ik_mode, double cruise_speed, double door_yaw) 
+{
+    hsr_mm_control::msg::MissionGoal goal_msg;
+    goal_msg.target_pose = pose;
+    goal_msg.use_ik_mode = ik_mode;
+
+    // Decompose speed into world X and Y based on door orientation
+    if (cruise_speed > 0.0) {
+        goal_msg.target_velocity.linear.x = cruise_speed * std::cos(door_yaw);
+        goal_msg.target_velocity.linear.y = cruise_speed * std::sin(door_yaw);
+    } else {
+        goal_msg.target_velocity.linear.x = 0.0;
+        goal_msg.target_velocity.linear.y = 0.0;
+    }
+
+    mission_pub_->publish(goal_msg);
 }
 
-bool MissionSequencer::get_tf_xyz(const std::string& parent,
-                                  const std::string& child,
-                                  double &x, double &y, double &z)
-{
-  try {
-    auto tf = tf_buffer_->lookupTransform(parent, child, tf2::TimePointZero);
-    x = tf.transform.translation.x;
-    y = tf.transform.translation.y;
-    z = tf.transform.translation.z;
-    return std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
-  } catch (const tf2::TransformException &ex) {
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                         "TF lookup failed (%s -> %s): %s",
-                         parent.c_str(), child.c_str(), ex.what());
-    return false;
-  }
-}
-
-bool MissionSequencer::get_base_yaw(double &yaw)
-{
+// ----------------------
+// TF setting and getting
+// ----------------------
+std::optional<RobotState> MissionSequencer::get_base_position() {
     try {
+        // Look up the transform once
         auto tf = tf_buffer_->lookupTransform(odom_frame_, base_frame_, tf2::TimePointZero);
-        tf2::Quaternion q(
-        tf.transform.rotation.x, tf.transform.rotation.y,
-        tf.transform.rotation.z, tf.transform.rotation.w);
         
+        RobotState state;
+        state.x = tf.transform.translation.x;
+        state.y = tf.transform.translation.y;
+        state.z = tf.transform.translation.z;
+
+        // Extract yaw
+        tf2::Quaternion q(tf.transform.rotation.x, tf.transform.rotation.y,
+                        tf.transform.rotation.z, tf.transform.rotation.w);
         double r, p;
-        tf2::Matrix3x3(q).getRPY(r, p, yaw);
-        return true;
+        tf2::Matrix3x3(q).getRPY(r, p, state.yaw);
+
+        // Fill the pose object for functions that need a Pose msg
+        state.pose.position.x = state.x;
+        state.pose.position.y = state.y;
+        state.pose.position.z = state.z;
+        state.pose.orientation = tf.transform.rotation;
+
+        return state;
     } catch (const tf2::TransformException &ex) {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                            "Yaw lookup failed: %s", ex.what());
-        return false;
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "TF Error: %s", ex.what());
+        return std::nullopt;
     }
 }
 
+std::optional<geometry_msgs::msg::Point> MissionSequencer::get_ee_position() {
+    try {
+        // We use odom_frame_ as the reference to match your original logic
+        auto tf = tf_buffer_->lookupTransform(odom_frame_, ee_frame_, tf2::TimePointZero);
+        geometry_msgs::msg::Point p;
+        p.x = tf.transform.translation.x;
+        p.y = tf.transform.translation.y;
+        p.z = tf.transform.translation.z;
+        return p;
+    } catch (const tf2::TransformException &ex) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "EE TF Error: %s", ex.what());
+        return std::nullopt;
+    }
+}
 
-bool MissionSequencer::base_close_xyw(double tx, double ty, double tw, double tol_xy, double tol_w)
+void MissionSequencer::set_yaw(geometry_msgs::msg::Pose &pose, double yaw) {
+    tf2::Quaternion q;
+    q.setRPY(0, 0, yaw);
+    pose.orientation.x = q.x();
+    pose.orientation.y = q.y();
+    pose.orientation.z = q.z();
+    pose.orientation.w = q.w();
+}
+
+
+// ---------------------------
+// Checking waypoint tolerance
+//----------------------------
+bool MissionSequencer::base_close_xyw(const RobotState& state, const geometry_msgs::msg::Pose& target, double tol_xy, double tol_w) 
 {
-    double x, y, z, current_yaw;
+    const double dist_err = std::hypot(target.position.x - state.x, target.position.y - state.y);
 
-    // 1. Safe Lookups: If TF is lagging, we return false immediately
-    if (!get_tf_xyz(odom_frame_, base_frame_, x, y, z)) return false;
-    if (!get_base_yaw(current_yaw)) return false;
+    // converting Quat -> Euler
+    tf2::Quaternion q(target.orientation.x, target.orientation.y, 
+                    target.orientation.z, target.orientation.w);
+    double r, p, target_yaw;
+    tf2::Matrix3x3(q).getRPY(r, p, target_yaw);
 
-    // 2. Calculate Translation Error
-    const double dist_err = std::hypot(tx - x, ty - y);
-
-    // 3. Calculate Orientation Error (Shortest Path)
-    double yaw_err = tw - current_yaw;
+    // SE3
+    double yaw_err = target_yaw - state.yaw;
     while (yaw_err > M_PI)  yaw_err -= 2.0 * M_PI;
     while (yaw_err < -M_PI) yaw_err += 2.0 * M_PI;
+    
     yaw_err = std::abs(yaw_err);
 
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                         "BASE Tracking: DistErr=%.3fm, YawErr=%.3frad", dist_err, yaw_err);
 
-    // 4. Convergence Check
     return (dist_err < tol_xy) && (yaw_err < tol_w);
 }
 
-bool MissionSequencer::ee_close_xyz(double tx, double ty, double tz, double tol_xyz)
+bool MissionSequencer::ee_close_xyz(const geometry_msgs::msg::Point& current_pos, double tx, double ty, double tz, double tol_xyz)
 {
-    double x, y, z;
-    if (!get_tf_xyz(odom_frame_, ee_frame_, x, y, z)) return false;
-    const double dx = tx - x, dy = ty - y, dz = tz - z;
+    const double dx = tx - current_pos.x;
+    const double dy = ty - current_pos.y;
+    const double dz = tz - current_pos.z;
+    
     const double err = std::sqrt(dx*dx + dy*dy + dz*dz);
+
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                        "EE err=%.3f (tol=%.3f) ee=[%.2f %.2f %.2f]",
-                        err, tol_xyz, x, y, z);
+                        "EE Tracking: Err=%.3fm (tol=%.3fm)", err, tol_xyz);
+
     return err < tol_xyz;
 }
 
+
+// --------
+// Main FSM
+// --------
 void MissionSequencer::simple_timer()
 {
     geometry_msgs::msg::Pose target_pose;
     std_msgs::msg::Bool mode_msg;
 
-    double current_x, current_y, current_z, current_yaw;
-    if (!get_tf_xyz(map_frame_, base_frame_, current_x, current_y, current_z) || 
-        !get_base_yaw(current_yaw)) {
-        return; // Don't act if TF is missing
-    }
-
-    auto set_yaw = [](geometry_msgs::msg::Pose &pose, double yaw) {
-        tf2::Quaternion q;
-        q.setRPY(0, 0, yaw);
-        pose.orientation.x = q.x();
-        pose.orientation.y = q.y();
-        pose.orientation.z = q.z();
-        pose.orientation.w = q.w();
-    };
-
+    // TF calls
+    auto robot = get_base_position();
+    auto ee_pos = get_ee_position();
+    if (!robot || !ee_pos) return;
 
     switch (simple_state_) {
 
         case SimpleState::MANUAL: {
-            // In Manual, we don't publish target_pose.
-            // This ensures the JointTrajectoryController doesn't move the robot.
-
-            // ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r /cmd_vel:=/omni_base_controller/cmd_vel
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000, 
-                                "MANUAL MODE: System waiting for 'A' button trigger.");
-            
-            // We publish mode = false just to be safe (base mode)
-            mode_msg.data = false;
-            mode_pub_->publish(mode_msg);
-            break; 
+            auto button = get_closest_button();
+            if (button) {
+                button_x = button->position.x;
+                button_y = button->position.y;
+                button_z = button->position.z;
+                simple_state_ = SimpleState::APPROACH;
+                RCLCPP_INFO(this->get_logger(), "Button found. Moving to APPROACH.");
+            }
+            break;
         }
         
         case SimpleState::APPROACH: {
-            // Current base pose in map
-            mode_msg.data = false; // Non-IK mode
-            mode_pub_->publish(mode_msg);
+            auto final_goal = feasible_standoff_utils::compute_circular_target(button_x, button_y, robot->x, robot->y, 1.25);
+            
+            publish_mission_goal(final_goal, false, 0.0, 0.0);
 
-            double rx, ry, rz;
-            if (!get_tf_xyz(map_frame_, base_frame_, rx, ry, rz)) return;
-
-            const double r_standoff = 1.25;
-            const double tol_xy     = 0.10;
-            const double tol_yaw    = 0.25;
-
-            // Compute final standoff goal (on ring facing the button)
-            auto final_goal = compute_standoff_goal(button_x, button_y, rx, ry, r_standoff);
-
-            target_pub_->publish(final_goal);
-
-            // Transition based on reaching the *final* goal, not the sub-goal
-            tf2::Quaternion q(final_goal.orientation.x, final_goal.orientation.y,
-                            final_goal.orientation.z, final_goal.orientation.w);
-            double gr, gp, final_yaw;
-            tf2::Matrix3x3(q).getRPY(gr, gp, final_yaw);
-
-            if (base_close_xyw(final_goal.position.x, final_goal.position.y, final_yaw, tol_xy, tol_yaw)) {
+            if (base_close_xyw(*robot, final_goal, 0.10, 0.25)) {
                 RCLCPP_INFO(this->get_logger(), "Standoff reached -> PRE_PRESS");
                 simple_state_ = SimpleState::PRE_PRESS;
             }
@@ -228,61 +205,26 @@ void MissionSequencer::simple_timer()
 
 
         case SimpleState::PRE_PRESS: {
-            // LOCK THE DOOR ANCHORS NOW
-            std_msgs::msg::Bool lock_msg;
-            lock_msg.data = true;
-            door_lock_pub_->publish(lock_msg);
-            
-            mode_msg.data = true; // Switch to IK mode
-            mode_pub_->publish(mode_msg);
-
             if (!have_costmap_) {
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
                                     "Waiting for costmap on topic: /local_costmap/costmap...");
                 return; // Exit early since we can't calculate a standoff without a map
             }
 
-            // 1) Compute feasible standoff ONCE
-            if (have_costmap_ && !have_standoff_) {
-                geometry_msgs::msg::Pose result_pose;
-
-                double rx, ry, rz;
-                if (!get_tf_xyz(map_frame_, base_frame_, rx, ry, rz)) return;
-
-                bool success = standoff_utils::compute_feasible_standoff(
-                    button_x, button_y, rx, ry, // Pass robot position
-                    latest_costmap_, 0.80, 72, 15,
-                    result_pose, debug_feasible_poses_);
-
-                if (success) {
-                    cached_standoff_ = result_pose;
-                    have_standoff_ = true;
-                    RCLCPP_INFO(this->get_logger(), "Feasible standoff locked.");
-                    publish_feasible_cloud(debug_feasible_poses_);
-                } else {
-                    RCLCPP_ERROR(this->get_logger(), "No safe standoff found! Aborting to MANUAL.");
-                    simple_state_ = SimpleState::MANUAL;
-                    break;
-                }
+            // Compute feasible standoff ONCE
+            if (standoff_yaw < -900) {
+                standoff_yaw = feasible_standoff_utils::compute_optimized_standoff(
+                    button_x, button_y, robot->x, robot->y, latest_costmap_);
+                if (standoff_yaw < -900) return;
             }
 
-            // 2) Extract the pre-calculated yaw from the cached pose
-            tf2::Quaternion q(cached_standoff_.orientation.x, cached_standoff_.orientation.y,
-                            cached_standoff_.orientation.z, cached_standoff_.orientation.w);
-            double r, p, press_yaw;
-            tf2::Matrix3x3(q).getRPY(r, p, press_yaw);
+            target_pose = feasible_standoff_utils::compute_ee_target(button_x, button_y, button_z, standoff_yaw, 0.15);
 
-            // 3) Offset the EE slightly from the button along that same yaw
-            const double ee_standoff_dist = 0.15;
-            target_pose.position.x = button_x - ee_standoff_dist * std::cos(press_yaw);
-            target_pose.position.y = button_y - ee_standoff_dist * std::sin(press_yaw);
-            target_pose.position.z = button_z;
-            set_yaw(target_pose, press_yaw);
+            set_yaw(target_pose, standoff_yaw);
 
-            target_pub_->publish(target_pose);
+            publish_mission_goal(target_pose, true, 0.0, 0.0);
 
-            // 4) Check for convergence
-            if (ee_close_xyz(target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.02)) {
+            if (ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.02)) {
                 simple_state_ = SimpleState::PRESS;
                 RCLCPP_INFO(this->get_logger(), "PRE_PRESS -> PRESS");
             }
@@ -290,29 +232,12 @@ void MissionSequencer::simple_timer()
         }
 
         case SimpleState::PRESS: {
-            mode_msg.data = true; // IK mode
-            mode_pub_->publish(mode_msg);
+            target_pose = feasible_standoff_utils::compute_ee_target(button_x, button_y, button_z-0.05, standoff_yaw, 0.06);
+            set_yaw(target_pose, standoff_yaw);
 
-            // 1) Extract the yaw from the standoff we validated in PRE_PRESS
-            tf2::Quaternion q(cached_standoff_.orientation.x, cached_standoff_.orientation.y,
-                            cached_standoff_.orientation.z, cached_standoff_.orientation.w);
-            double r, p, press_yaw;
-            tf2::Matrix3x3(q).getRPY(r, p, press_yaw);
+            publish_mission_goal(target_pose, true, 0.0, 0.0);
 
-            // 2) Move "deeper" into the button. 
-            // We change the offset from 0.15 (standoff) to 0.05 (pressing depth)
-            const double push_depth = 0.06; 
-            target_pose.position.x = button_x - push_depth * std::cos(press_yaw);
-            target_pose.position.y = button_y - push_depth * std::sin(press_yaw);
-            
-            // Keep your hardcoded Z-offset for a slight downward "press" feel
-            target_pose.position.z = button_z - 0.05; 
-            
-            set_yaw(target_pose, press_yaw);
-            target_pub_->publish(target_pose);
-
-            // 3) Check for convergence
-            if (ee_close_xyz(target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.025)) {
+            if (ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.025)) {
                 simple_state_ = SimpleState::RETRACT;
                 RCLCPP_INFO(this->get_logger(), "PRESS -> RETRACT");
             }
@@ -320,62 +245,104 @@ void MissionSequencer::simple_timer()
         }
 
         case SimpleState::RETRACT: {
-            mode_msg.data = false; // Base control mode
-            mode_pub_->publish(mode_msg);
+            auto door = get_complete_door(button_x, button_y);
+            if (!door) return;
 
-            // 1. Get the original press heading
-            tf2::Quaternion q_standoff(cached_standoff_.orientation.x, cached_standoff_.orientation.y,
-                                    cached_standoff_.orientation.z, cached_standoff_.orientation.w);
-            double r, p, press_yaw;
-            tf2::Matrix3x3(q_standoff).getRPY(r, p, press_yaw);
-
-            // 2. Define the target heading (Pivot 40-60 degrees toward the door)
-            // Using your M_PI * 2 / 9.0 (40 degrees) logic
-            double target_yaw = press_yaw + (M_PI * 2.0 / 9.0); 
-            while (target_yaw > M_PI) target_yaw -= 2.0 * M_PI;
-            while (target_yaw < -M_PI) target_yaw += 2.0 * M_PI;
-
-            // 3. Move back to a "Safety Distance" (0.6m is usually enough to rotate safely)
-            const double safety_dist = 0.60;
-            target_pose.position.x = button_x - safety_dist * std::cos(press_yaw);
-            target_pose.position.y = button_y - safety_dist * std::sin(press_yaw);
-            target_pose.position.z = button_z; // Keep arm height steady
+            double door_yaw = feasible_standoff_utils::get_pose_yaw(door->center);
+            double target_x = door->pillar.position.x - 0.6 * std::cos(door_yaw);
+            double target_y = door->pillar.position.y - 0.6 * std::sin(door_yaw);
             
-            // Face the target yaw while backing up
-            set_yaw(target_pose, target_yaw);
-            target_pub_->publish(target_pose);
+            target_pose.position.x = target_x;
+            target_pose.position.y = target_y;
 
-            // 4. Convergence Check
-            // Use a slightly looser tolerance for the exit transition
-            if (base_close_xyw(target_pose.position.x, target_pose.position.y, target_yaw, 0.08, 0.15)) {
-                simple_state_ = SimpleState::DONE;
-                RCLCPP_INFO(this->get_logger(), "RETRACT -> EXIT (Safe pivot achieved)");
+            double fixed_angle_to_center = std::atan2(door->center.position.y - target_y, 
+                                                    door->center.position.x - target_x);
+            
+            set_yaw(target_pose, fixed_angle_to_center);
+            publish_mission_goal(target_pose, false, 0.0, 0.0);
+
+            // 3. TRANSITION
+            // Note: 0.05m is a very tight tolerance for a 5-second window. 
+            // If the robot "hunts" at the end, consider 0.1m.
+            if (base_close_xyw(*robot, target_pose, 0.10, 0.15)) {
+                simple_state_ = SimpleState::EXIT;
+                RCLCPP_INFO(this->get_logger(), "RETRACT -> EXIT");
             }
             break;
         }
 
         case SimpleState::EXIT: {
-            mode_msg.data = false; 
-            mode_pub_->publish(mode_msg);
+            auto door = get_complete_door(button_x, button_y);
+            if (!door) return;
 
-            // Waypoint: Drive to the center of the gap
-            // Side wall tip is at X=0.5, Front wall is at X=2.5. Midpoint X = 1.5.
-            // Move Y to 2.0 to clear the hallway
-            double tx = 1.5; 
-            double ty = 1.5; 
-            double tw = 1.5708; // Face "North" (toward the gap)
+            double door_yaw = feasible_standoff_utils::get_pose_yaw(door->center);
+            double dx = robot->x - door->center.position.x;
+            double dy = robot->y - door->center.position.y;
+            double progress = dx * std::cos(door_yaw) + dy * std::sin(door_yaw);
 
-            target_pose.position.x = tx;
-            target_pose.position.y = ty;
-            set_yaw(target_pose, tw);
-            target_pub_->publish(target_pose);
+            double target_offset = 0.0;
 
-            if (base_close_xyw(tx, ty, tw, 0.15, 0.2)) {
+            // --- 4-STAGE RELAY LOGIC ---
+            // We update the target way BEFORE the robot reaches the current one
+            // to prevent the quintic "slow-down" phase.
+            if (progress < -0.3) {
+                target_offset = 0.2;  // Aim for threshold
+            } 
+            else if (progress < 0.1) {
+                target_offset = 0.6;  // Aim for middle of door
+            } 
+            else if (progress < 0.5) {
+                target_offset = 1.2;  // Aim for clearing the frame
+            } 
+            else {
+                target_offset = 1.8;  // The "Deep Clear" target
+            }
+
+            target_pose.position.x = door->center.position.x + target_offset * std::cos(door_yaw);
+            target_pose.position.y = door->center.position.y + target_offset * std::sin(door_yaw);
+            set_yaw(target_pose, door_yaw);
+            publish_mission_goal(target_pose, false, 0.0, 0.0);
+
+            // --- FINAL SUCCESS ---
+            // We only need to reach 1.2m to be fully clear of the swing
+            if (progress > 1.2) {
                 simple_state_ = SimpleState::DONE;
-                RCLCPP_INFO(this->get_logger(), "EXIT -> DONE (Gap cleared)");
+                RCLCPP_INFO(this->get_logger(), "Sprint Complete. Final progress: %.2fm", progress);
             }
             break;
         }
+
+        // case SimpleState::EXIT: {
+        //     auto door = get_complete_door(button_x, button_y);
+        //     if (!door) return;
+
+        //     double door_yaw = feasible_standoff_utils::get_pose_yaw(door->center);
+            
+        //     // 1. Calculate signed progress
+        //     double dx = robot->x - door->center.position.x;
+        //     double dy = robot->y - door->center.position.y;
+        //     double progress = dx * std::cos(door_yaw) + dy * std::sin(door_yaw);
+
+        //     // 2. THE SPEED FIX: Keep the target CLOSE but MOVING.
+        //     // Instead of 3.0m (which makes a long T_dynamic), we use 0.5m.
+        //     // This forces T_dynamic to be short (~5s), making the spline much "steeper."
+        //     double carrot_offset = 0.5; 
+            
+        //     // We target a point 0.5m ahead of where the robot CURRENTLY is,
+        //     // but projected onto the door's center line.
+        //     target_pose.position.x = robot->x + carrot_offset * std::cos(door_yaw);
+        //     target_pose.position.y = robot->y + carrot_offset * std::sin(door_yaw);
+            
+        //     set_yaw(target_pose, door_yaw);
+        //     target_pub_->publish(target_pose);
+
+        //     // 3. EXIT CONDITION
+        //     if (progress > 1.2) {
+        //         simple_state_ = SimpleState::DONE;
+        //         RCLCPP_INFO(this->get_logger(), "Clearance achieved.");
+        //     }
+        //     break;
+        // }
 
         case SimpleState::DONE: {
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
@@ -385,74 +352,110 @@ void MissionSequencer::simple_timer()
     }
 }
 
-geometry_msgs::msg::Pose MissionSequencer::compute_standoff_goal(
-    double bx, double by,
-    double rx, double ry,
-    double r_standoff)
-{
-  geometry_msgs::msg::Pose goal;
+// ----------------------
+// Helper for Approach
+// ----------------------
 
-  // 1) direction from button -> robot
-  double vx = rx - bx;
-  double vy = ry - by;
-  double d  = std::hypot(vx, vy);
 
-  // guard against divide-by-zero (robot exactly at button)
-  if (d < 1e-3) {
-    // pick any direction (e.g., +x)
-    vx = 1.0; vy = 0.0; d = 1.0;
-  }
+// visual for approach standoff
+// void MissionSequencer::publish_feasible_cloud(const std::vector<geometry_msgs::msg::Pose>& poses)
+// {
+//     visualization_msgs::msg::MarkerArray arr;
 
-  // 2) unit vector
-  double ux = vx / d;
-  double uy = vy / d;
+//     // Clear previous
+//     visualization_msgs::msg::Marker clear;
+//     clear.action = visualization_msgs::msg::Marker::DELETEALL;
+//     arr.markers.push_back(clear);
 
-  // 3) standoff point on ring
-  goal.position.x = bx + r_standoff * ux;
-  goal.position.y = by + r_standoff * uy;
-  goal.position.z = 0.0; // base goal, z unused
+//     int id = 0;
+//     for (const auto& p : poses) {
+//         visualization_msgs::msg::Marker m;
+//         // Use the frame the costmap lives in (likely "odom")
+//         m.header.frame_id = latest_costmap_.header.frame_id; 
+//         m.header.stamp = this->now();
+//         m.ns = "feasible_points";
+//         m.id = id++;
+//         m.type = visualization_msgs::msg::Marker::SPHERE;
+//         m.action = visualization_msgs::msg::Marker::ADD;
 
-  // 4) face the button
-  double yaw = std::atan2(by - goal.position.y, bx - goal.position.x);
+//         m.pose = p;
+//         m.pose.position.z = 0.05; 
+//         m.scale.x = 0.08; m.scale.y = 0.08; m.scale.z = 0.08;
 
-  tf2::Quaternion q;
-  q.setRPY(0, 0, yaw);
-  goal.orientation.x = q.x();
-  goal.orientation.y = q.y();
-  goal.orientation.z = q.z();
-  goal.orientation.w = q.w();
+//         m.color.r = 0.0f; m.color.g = 1.0f; m.color.b = 0.0f; m.color.a = 0.8f;
+//         arr.markers.push_back(m);
+//     }
+//     marker_array_pub_->publish(arr);
+// }
 
-  return goal;
+
+
+// --------------------
+// Vision Marker Parser
+// --------------------
+
+std::optional<geometry_msgs::msg::Pose> MissionSequencer::get_closest_button() {
+    double best_dist = 1e6;
+    std::optional<geometry_msgs::msg::Pose> best_pose;
+
+    auto robot = get_base_position();
+    if (!robot) return std::nullopt;
+
+    for (const auto& m : latest_markers_.markers) {
+        if (m.action == visualization_msgs::msg::Marker::DELETEALL || m.ns.empty()) continue;
+        
+        if (m.ns.find("button") != std::string::npos) {
+            // Use robot->x and robot->y from our state struct
+            double d = std::hypot(m.pose.position.x - robot->x, m.pose.position.y - robot->y);
+            if (d < best_dist) {
+                best_dist = d;
+                best_pose = m.pose;
+            }
+        }
+    }
+    return best_pose;
 }
 
-void MissionSequencer::publish_feasible_cloud(const std::vector<geometry_msgs::msg::Pose>& poses)
-{
-    visualization_msgs::msg::MarkerArray arr;
+std::optional<DoorInfo> MissionSequencer::get_complete_door(double bx, double by) {
+    std::optional<geometry_msgs::msg::Pose> best_center;
+    std::string best_ns = "";
+    double best_dist = 1e6;
 
-    // Clear previous
-    visualization_msgs::msg::Marker clear;
-    clear.action = visualization_msgs::msg::Marker::DELETEALL;
-    arr.markers.push_back(clear);
-
-    int id = 0;
-    for (const auto& p : poses) {
-        visualization_msgs::msg::Marker m;
-        // Use the frame the costmap lives in (likely "odom")
-        m.header.frame_id = latest_costmap_.header.frame_id; 
-        m.header.stamp = this->now();
-        m.ns = "feasible_points";
-        m.id = id++;
-        m.type = visualization_msgs::msg::Marker::SPHERE;
-        m.action = visualization_msgs::msg::Marker::ADD;
-
-        m.pose = p;
-        m.pose.position.z = 0.05; 
-        m.scale.x = 0.08; m.scale.y = 0.08; m.scale.z = 0.08;
-
-        m.color.r = 0.0f; m.color.g = 1.0f; m.color.b = 0.0f; m.color.a = 0.8f;
-        arr.markers.push_back(m);
+    // 1. Find the Arrow (Center) closest to the button
+    for (const auto& m : latest_markers_.markers) {
+        if (m.type == visualization_msgs::msg::Marker::ARROW && m.ns.find("door") != std::string::npos) {
+            double d = std::hypot(m.pose.position.x - bx, m.pose.position.y - by);
+            if (d < 2.0 && d < best_dist) {
+                best_dist = d;
+                best_center = m.pose;
+                // Extract the unique door ID part (e.g., "door_101")
+                best_ns = m.ns.substr(0, m.ns.find("_arrow"));
+            }
+        }
     }
-    marker_array_pub_->publish(arr);
+
+    if (!best_center || best_ns.empty()) return std::nullopt;
+
+    // 2. Find the Pillar (Cylinder) that belongs to that SAME door ID
+    DoorInfo door;
+    door.center = *best_center;
+    double best_pillar_dist = 1e6;
+    bool found_pillar = false;
+
+    for (const auto& m : latest_markers_.markers) {
+        // Must match the exact door ID and be a pillar
+        if (m.ns.find(best_ns) != std::string::npos && m.type == visualization_msgs::msg::Marker::CYLINDER) {
+            double d = std::hypot(m.pose.position.x - bx, m.pose.position.y - by);
+            if (d < best_pillar_dist) {
+                best_pillar_dist = d;
+                door.pillar = m.pose;
+                found_pillar = true;
+            }
+        }
+    }
+
+    if (found_pillar) return door;
+    return std::nullopt;
 }
 
 int main(int argc, char ** argv)

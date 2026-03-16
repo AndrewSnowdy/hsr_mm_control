@@ -19,11 +19,22 @@ find_package(pinocchio REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+# custom msg
+# 1. Add the generator package
+find_package(rosidl_default_generators REQUIRED)
+
+# 2. Add your new message file
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/MissionGoal.msg"
+  DEPENDENCIES geometry_msgs
+)
+rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_typesupport_cpp")
 
 # ---- Utils library ----
 add_library(hsr_mm_utils
-  src/utils.cpp
+  src/utils_feasible_points.cpp
 )
 
 target_include_directories(hsr_mm_utils PUBLIC
@@ -44,6 +55,7 @@ add_executable(kinematic_setpoint_node src/kinematic_setpoint_node.cpp)
 target_include_directories(kinematic_setpoint_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+
 ament_target_dependencies(kinematic_setpoint_node
   rclcpp
   geometry_msgs
@@ -55,6 +67,7 @@ ament_target_dependencies(kinematic_setpoint_node
   tf2_geometry_msgs
 )
 target_link_libraries(kinematic_setpoint_node
+  "${cpp_typesupport_target}"
   pinocchio::pinocchio
   Eigen3::Eigen
 )
@@ -75,6 +88,7 @@ ament_target_dependencies(joint_trajectory_node
   tf2_geometry_msgs
 )
 target_link_libraries(joint_trajectory_node
+  "${cpp_typesupport_target}"
   Eigen3::Eigen
 )
 
@@ -95,6 +109,7 @@ ament_target_dependencies(mission_sequencer
   visualization_msgs
 )
 target_link_libraries(mission_sequencer
+  "${cpp_typesupport_target}"
   hsr_mm_utils
 )
 

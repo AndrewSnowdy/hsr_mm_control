@@ -1,0 +1,3 @@
+geometry_msgs/Pose target_pose
+geometry_msgs/Twist target_velocity
+bool use_ik_mode
