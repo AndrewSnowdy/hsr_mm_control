@@ -42,17 +42,19 @@ struct DoorInfo {
     geometry_msgs::msg::Pose pillar;
 };
 
+struct ButtonInfo {
+    geometry_msgs::msg::Pose pose;
+    std::string type;
+};
+
 class MissionSequencer : public rclcpp::Node {
 public:
     MissionSequencer();
 
-private:
-    // --- Core FSM ---
-    void simple_timer();
-    SimpleState simple_state_{SimpleState::MANUAL};
-
-    // --- Mission Goal Helper ---
-    rclcpp::Publisher<hsr_mm_control::msg::MissionGoal>::SharedPtr mission_pub_;
+    geometry_msgs::msg::Pose interpolate_pose(const geometry_msgs::msg::Pose& start, 
+                                             const geometry_msgs::msg::Pose& end, 
+                                             double ratio);
+                                             
     void publish_mission_goal(const geometry_msgs::msg::Pose& pose, bool ik_mode, double cruise_speed, double door_yaw);
 
     // --- Math & Checking Helpers ---
@@ -63,9 +65,28 @@ private:
     // --- TF & Sensor Processing ---
     std::optional<RobotState> get_base_position();
     std::optional<geometry_msgs::msg::Point> get_ee_position();
-    std::optional<geometry_msgs::msg::Pose> get_closest_button();
-    std::optional<geometry_msgs::msg::Pose> get_door_near_button(double bx, double by);
+    // std::optional<geometry_msgs::msg::Pose> get_closest_button();
+    std::optional<ButtonInfo> get_closest_button();
     std::optional<DoorInfo>  get_complete_door(double bx, double by);
+
+    // --- Add these to the public section of MissionSequencer ---
+    bool have_costmap() const { return have_costmap_; }
+    const nav_msgs::msg::OccupancyGrid& get_latest_costmap() const { return latest_costmap_; }
+    // Add to public section of MissionSequencer
+    double get_standoff_yaw() const { return standoff_yaw; }
+
+
+    void publish_feasible_cloud(const std::vector<geometry_msgs::msg::Pose>& poses);
+
+private:
+    // --- Core FSM ---
+    void simple_timer();
+    SimpleState simple_state_{SimpleState::MANUAL};
+
+    // --- Mission Goal Helper ---
+    rclcpp::Publisher<hsr_mm_control::msg::MissionGoal>::SharedPtr mission_pub_;
+
+
     
     // --- Subscriptions ---
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
@@ -105,5 +126,5 @@ private:
 
     // --- Future/Debug Functions (Kept as requested) ---
     
-    // void publish_feasible_cloud(const std::vector<geometry_msgs::msg::Pose>& poses);
+    
 };

@@ -1,10 +1,393 @@
 #include "hsr_mm_control/mission_sequencer.hpp"
 #include "hsr_mm_control/utils_feasible_points.hpp"
+#include "behaviortree_cpp/bt_factory.h"
+#include "behaviortree_cpp/loggers/bt_cout_logger.h"
+#include "std_msgs/msg/int32.hpp"
 
 using namespace std::chrono_literals;
 
 
-geometry_msgs::msg::Pose interpolate_pose(const geometry_msgs::msg::Pose& start, const geometry_msgs::msg::Pose& end, double ratio) {
+class SearchForButton : public BT::SyncActionNode {
+public:
+    SearchForButton(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+        : BT::SyncActionNode(name, config), s_(s) {}
+
+    static BT::PortsList providedPorts() {
+        return { 
+            BT::OutputPort<geometry_msgs::msg::Pose>("btn_pose"),
+            BT::OutputPort<std::string>("btn_type") // Added this port
+        };
+    }
+
+    BT::NodeStatus tick() override {
+        // Now returns std::optional<ButtonInfo>
+        auto result = s_->get_closest_button(); 
+        
+        if (result) {
+            // result is the struct; result->pose and result->type are the fields
+            setOutput("btn_pose", result->pose);
+            setOutput("btn_type", result->type);
+
+            RCLCPP_INFO(s_->get_logger(), "BT: Found %s! Passing to Blackboard.", result->type.c_str());
+            return BT::NodeStatus::SUCCESS;
+        }
+        
+        return BT::NodeStatus::FAILURE;
+    }
+private:
+    MissionSequencer* s_;
+};
+
+// --- NODE 2: APPROACH (Replaces case APPROACH) ---
+class ApproachButton : public BT::StatefulActionNode {
+public:
+    ApproachButton(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+        : BT::StatefulActionNode(name, config), s_(s) {}
+
+    static BT::PortsList providedPorts() {
+        return { BT::InputPort<geometry_msgs::msg::Pose>("btn_pose") };
+    }
+
+    // Runs once when the node is first called
+    BT::NodeStatus onStart() override {
+        if (!getInput("btn_pose", target_button_)) {
+            return BT::NodeStatus::FAILURE;
+        }
+        start_dist_ = -1.0; // Reset interpolation tracking
+        return BT::NodeStatus::RUNNING;
+    }
+
+    // Runs repeatedly until it returns SUCCESS or FAILURE
+    BT::NodeStatus onRunning() override {
+
+        if (!getInput("btn_pose", target_button_)) {
+            return BT::NodeStatus::RUNNING; 
+        }
+
+        auto robot = s_->get_base_position();
+        if (!robot) return BT::NodeStatus::RUNNING;
+
+        // --- YOUR ORIGINAL LOGIC ---
+        auto final_standoff = feasible_standoff_utils::compute_circular_target(
+            target_button_.position.x, target_button_.position.y, robot->x, robot->y, 1.25);
+        
+        if (start_dist_ < 0) {
+            start_dist_ = std::hypot(final_standoff.position.x - robot->x, final_standoff.position.y - robot->y);
+            start_pose_ = robot->pose;
+        }
+
+        double current_dist = std::hypot(final_standoff.position.x - robot->x, final_standoff.position.y - robot->y);
+        double progress = 1.0 - (current_dist / start_dist_);
+        double heading = std::atan2(final_standoff.position.y - robot->y, final_standoff.position.x - robot->x);
+
+        if (progress < 0.24) {
+            auto next_waypoint = s_->interpolate_pose(start_pose_, final_standoff, 0.26);
+            s_->publish_mission_goal(next_waypoint, false, 0.225, heading);
+        } else if (progress < 0.74) {
+            auto next_waypoint = s_->interpolate_pose(start_pose_, final_standoff, 0.76);
+            s_->publish_mission_goal(next_waypoint, false, 0.25, heading);
+        } else {
+            s_->publish_mission_goal(final_standoff, false, 0.0, 0.0);
+        }
+
+        // The "Spatial Switch" trigger
+        if (s_->base_close_xyw(*robot, final_standoff, 0.10, 0.20)) {
+            RCLCPP_INFO(s_->get_logger(), "BT: Approach Complete.");
+            return BT::NodeStatus::SUCCESS;
+        }
+
+        return BT::NodeStatus::RUNNING;
+    }
+
+    void onHalted() override { /* Stop robot if interrupted */ }
+
+private:
+    MissionSequencer* s_;
+    geometry_msgs::msg::Pose target_button_;
+    geometry_msgs::msg::Pose start_pose_;
+    double start_dist_ = -1.0;
+};
+
+
+
+class PrePress : public BT::StatefulActionNode {
+public:
+    PrePress(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+        : BT::StatefulActionNode(name, config), s_(s) {}
+
+    static BT::PortsList providedPorts() {
+        return { BT::InputPort<geometry_msgs::msg::Pose>("btn_pose"),
+                BT::OutputPort<double>("final_yaw") }; 
+    }
+
+    BT::NodeStatus onStart() override {
+        if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::FAILURE;
+        standoff_yaw_ = -999.0; // Reset for a fresh calculation
+        return BT::NodeStatus::RUNNING;
+    }
+
+    BT::NodeStatus onRunning() override {
+        // 1. Adaptive update of button location
+        if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::RUNNING;
+
+        // 2. Safety: Wait for costmap
+        if (!s_->have_costmap()) {
+            RCLCPP_WARN_THROTTLE(s_->get_logger(), *s_->get_clock(), 2000, "PrePress: Waiting for costmap...");
+            return BT::NodeStatus::RUNNING;
+        }
+
+        auto robot = s_->get_base_position();
+        auto ee_pos = s_->get_ee_position();
+        if (!robot || !ee_pos) return BT::NodeStatus::RUNNING;
+
+        // 3. Compute optimized yaw once (or keep updating if you want it very adaptive)
+        if (standoff_yaw_ < -900) {
+            std::vector<geometry_msgs::msg::Pose> debug_cloud;
+            std::cout << "created pose vector " << std::endl;
+
+            standoff_yaw_ = feasible_standoff_utils::compute_optimized_standoff(
+                target_button_.position.x, target_button_.position.y, 
+                robot->x, robot->y, s_->get_latest_costmap(),
+                &debug_cloud);
+
+            std::cout << "Got output of optimized pose" << std::endl;
+            
+            if (standoff_yaw_ < -900) return BT::NodeStatus::RUNNING; 
+            s_->publish_feasible_cloud(debug_cloud);
+        }
+
+        // 4. Calculate EE target pose (0.15m standoff)
+        auto target_pose = feasible_standoff_utils::compute_ee_target(
+            target_button_.position.x, target_button_.position.y, target_button_.position.z, 
+            standoff_yaw_, 0.15);
+        
+        s_->set_yaw(target_pose, standoff_yaw_);
+
+        // 5. Publish to controller with IK mode = TRUE
+        s_->publish_mission_goal(target_pose, true, 0.0, 0.0);
+
+        // 6. Check if EE has arrived (2cm tolerance)
+        if (s_->ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.02)) {
+            RCLCPP_INFO(s_->get_logger(), "BT: PrePress Complete. Arm is in position.");
+            setOutput("final_yaw", standoff_yaw_);
+            return BT::NodeStatus::SUCCESS;
+        }
+
+        return BT::NodeStatus::RUNNING;
+    }
+
+    void onHalted() override {}
+
+private:
+    MissionSequencer* s_;
+    geometry_msgs::msg::Pose target_button_;
+    double standoff_yaw_ = -999.0;
+};
+
+
+class PressButton : public BT::StatefulActionNode {
+public:
+    PressButton(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+        : BT::StatefulActionNode(name, config), s_(s) {}
+
+    static BT::PortsList providedPorts() {
+        return { BT::InputPort<geometry_msgs::msg::Pose>("btn_pose"),
+                 BT::InputPort<double>("locked_yaw"),
+                 BT::InputPort<double>("depth") }; // New Port
+    }
+
+    BT::NodeStatus onStart() override {
+        if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::FAILURE;
+        if (!getInput("locked_yaw", standoff_yaw_)) return BT::NodeStatus::FAILURE;
+        
+        // If depth isn't provided in XML, default to 0.06
+        if (!getInput("depth", target_depth_)) {
+            target_depth_ = 0.06;
+        }
+        
+        return BT::NodeStatus::RUNNING;
+    }
+
+    BT::NodeStatus onRunning() override {
+        auto ee_pos = s_->get_ee_position();
+        if (!ee_pos) return BT::NodeStatus::RUNNING;
+
+        // Use the target_depth_ we got from the Blackboard/XML
+        auto press_pose = feasible_standoff_utils::compute_ee_target(
+            target_button_.position.x, target_button_.position.y, target_button_.position.z, 
+            standoff_yaw_, target_depth_);
+        
+        s_->set_yaw(press_pose, standoff_yaw_);
+        s_->publish_mission_goal(press_pose, true, 0.0, 0.0);
+
+        // Arrival check
+        if (s_->ee_close_xyz(*ee_pos, press_pose.position.x, press_pose.position.y, press_pose.position.z, 0.02)) {
+            RCLCPP_INFO(s_->get_logger(), "BT: Press/Wave at depth %.2fm Complete.", target_depth_);
+            return BT::NodeStatus::SUCCESS;
+        }
+
+        return BT::NodeStatus::RUNNING;
+    }
+
+    void onHalted() override {}
+
+private:
+    MissionSequencer* s_;
+    geometry_msgs::msg::Pose target_button_;
+    double standoff_yaw_;
+    double target_depth_; // Store the depth here
+};
+
+
+class Retract : public BT::StatefulActionNode {
+public:
+    Retract(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+        : BT::StatefulActionNode(name, config), s_(s) {}
+
+    static BT::PortsList providedPorts() {
+        return { BT::InputPort<geometry_msgs::msg::Pose>("btn_pose") };
+    }
+
+    BT::NodeStatus onStart() override {
+        if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::FAILURE;
+        return BT::NodeStatus::RUNNING;
+    }
+
+    BT::NodeStatus onRunning() override {
+        auto robot = s_->get_base_position();
+        if (!robot) return BT::NodeStatus::RUNNING;
+
+        // 1. Find the door markers near the button
+        auto door = s_->get_complete_door(target_button_.position.x, target_button_.position.y);
+        if (!door) {
+            RCLCPP_WARN_THROTTLE(s_->get_logger(), *s_->get_clock(), 2000, "Retract: Searching for door markers...");
+            return BT::NodeStatus::RUNNING;
+        }
+
+        // 2. Get door orientation
+        tf2::Quaternion q(door->center.orientation.x, door->center.orientation.y, 
+                        door->center.orientation.z, door->center.orientation.w);
+        double r, p, door_yaw;
+        tf2::Matrix3x3(q).getRPY(r, p, door_yaw);
+
+        // 3. Calculate target: 0.6m "behind" the pillar along the door's axis
+        geometry_msgs::msg::Pose target_pose;
+        target_pose.position.x = door->pillar.position.x - 0.6 * std::cos(door_yaw);
+        target_pose.position.y = door->pillar.position.y - 0.6 * std::sin(door_yaw);
+        
+        // 4. Set heading to face the door center (preparing to drive through)
+        double angle_to_center = std::atan2(door->center.position.y - target_pose.position.y, 
+                                            door->center.position.x - target_pose.position.x);
+        s_->set_yaw(target_pose, angle_to_center);
+
+        // 5. Move (IK mode = false, we want the base to move)
+        s_->publish_mission_goal(target_pose, false, 0.0, 0.0);
+
+        // 6. Check arrival
+        if (s_->base_close_xyw(*robot, target_pose, 0.10, 0.15)) {
+            RCLCPP_INFO(s_->get_logger(), "BT: Retract Complete.");
+            return BT::NodeStatus::SUCCESS;
+        }
+
+        return BT::NodeStatus::RUNNING;
+    }
+
+    void onHalted() override {}
+
+private:
+    MissionSequencer* s_;
+    geometry_msgs::msg::Pose target_button_;
+};
+
+
+
+class ExitDoor : public BT::StatefulActionNode {
+public:
+    ExitDoor(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+        : BT::StatefulActionNode(name, config), s_(s) {}
+
+    static BT::PortsList providedPorts() {
+        return { BT::InputPort<geometry_msgs::msg::Pose>("btn_pose") };
+    }
+
+    BT::NodeStatus onStart() override {
+        if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::FAILURE;
+        return BT::NodeStatus::RUNNING;
+    }
+
+    BT::NodeStatus onRunning() override {
+        auto robot = s_->get_base_position();
+        if (!robot) return BT::NodeStatus::RUNNING;
+
+        auto door = s_->get_complete_door(target_button_.position.x, target_button_.position.y);
+        if (!door) return BT::NodeStatus::RUNNING;
+
+        double door_yaw = feasible_standoff_utils::get_pose_yaw(door->center);
+        
+        // 1. Calculate Progress (p) for switching between ghost poses
+        double dx = robot->x - door->center.position.x;
+        double dy = robot->y - door->center.position.y;
+        double p = dx * std::cos(door_yaw) + dy * std::sin(door_yaw);
+
+        // 2. Define our 3 Ghost Poses (Stage 1, Stage 2, and the Final Goal)
+        geometry_msgs::msg::Pose stage1 = door->center; // Just past threshold
+        stage1.position.x += 0.2 * std::cos(door_yaw);
+        stage1.position.y += 0.2 * std::sin(door_yaw);
+
+        geometry_msgs::msg::Pose stage2 = door->center; // Mid-way clear
+        stage2.position.x += 0.8 * std::cos(door_yaw);
+        stage2.position.y += 0.8 * std::sin(door_yaw);
+
+        geometry_msgs::msg::Pose final_goal = door->center; // Deep clear
+        final_goal.position.x += 1.5 * std::cos(door_yaw);
+        final_goal.position.y += 1.5 * std::sin(door_yaw);
+
+        // 3. Calculate Distance to Final Goal
+        double dist_to_goal = std::hypot(final_goal.position.x - robot->x, 
+                                        final_goal.position.y - robot->y);
+
+        // DEBUG: Print status every 500ms
+        RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 500, 
+            "ExitDoor DEBUG: p=%.3f | DistToGoal=%.3f", 
+            p, dist_to_goal);
+
+        // 3. THE FINAL ARRIVAL CHECK (The Reset Trigger)
+        // We only return SUCCESS when we are physically at the final_goal
+        if (s_->base_close_xyw(*robot, final_goal, 0.15, 0.20)) {
+            RCLCPP_INFO(s_->get_logger(), "BT: Exit Complete. Arrived at final standoff.");
+            return BT::NodeStatus::SUCCESS;
+        }
+
+        // 4. THE GHOST POSE RELAY
+        // This maintains your specific pathing logic
+        if (p < -0.1) {
+            // Robot is still in/near the frame, send ghost to Stage 1
+            s_->publish_mission_goal(stage1, false, 0.25, door_yaw);
+        } 
+        else if (p < 0.6) {
+            // Robot is moving through, send ghost to Stage 2
+            s_->publish_mission_goal(stage2, false, 0.3, door_yaw);
+        } 
+        else {
+            // Robot is mostly clear, send ghost to the Final Goal
+            s_->publish_mission_goal(final_goal, false, 0.0, door_yaw);
+        } 
+
+        return BT::NodeStatus::RUNNING;
+    }
+
+    void onHalted() override {}
+
+private:
+    MissionSequencer* s_;
+    geometry_msgs::msg::Pose target_button_;
+};
+
+
+
+geometry_msgs::msg::Pose MissionSequencer::interpolate_pose(const geometry_msgs::msg::Pose& start, 
+                                                           const geometry_msgs::msg::Pose& end, 
+                                                           double ratio) {
     geometry_msgs::msg::Pose p = end;
     p.position.x = start.position.x + ratio * (end.position.x - start.position.x);
     p.position.y = start.position.y + ratio * (end.position.y - start.position.y);
@@ -16,9 +399,7 @@ MissionSequencer::MissionSequencer()
 : Node("mission_sequencer"),
     simple_state_(SimpleState::MANUAL)
 {
-    // mode_pub_ = this->create_publisher<std_msgs::msg::Bool>("/use_ik_mode", 10);
-    // target_pub_ = this->create_publisher<geometry_msgs::msg::Pose>("/waypoint_target", 10);
-    // marker_array_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("feasible_samples", 10);
+    marker_array_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("feasible_samples", 10);
     mission_pub_ = this->create_publisher<hsr_mm_control::msg::MissionGoal>("/mission_command", 10);
 
     door_lock_pub_ = this->create_publisher<std_msgs::msg::Bool>("/door_lock_trigger", 10);
@@ -26,7 +407,7 @@ MissionSequencer::MissionSequencer()
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-    timer_ = this->create_wall_timer(100ms, std::bind(&MissionSequencer::simple_timer, this));
+    // timer_ = this->create_wall_timer(100ms, std::bind(&MissionSequencer::simple_timer, this));
 
     auto costmap_qos = rclcpp::QoS(rclcpp::KeepLast(1))
         .reliable()
@@ -170,279 +551,40 @@ bool MissionSequencer::ee_close_xyz(const geometry_msgs::msg::Point& current_pos
     return err < tol_xyz;
 }
 
-
-// --------
-// Main FSM
-// --------
-void MissionSequencer::simple_timer()
-{
-    geometry_msgs::msg::Pose target_pose;
-    std_msgs::msg::Bool mode_msg;
-
-    // TF calls
-    auto robot = get_base_position();
-    auto ee_pos = get_ee_position();
-    if (!robot || !ee_pos) return;
-
-    switch (simple_state_) {
-
-        case SimpleState::MANUAL: {
-            auto button = get_closest_button();
-            if (button) {
-                button_x = button->position.x;
-                button_y = button->position.y;
-                button_z = button->position.z;
-                simple_state_ = SimpleState::APPROACH;
-                RCLCPP_INFO(this->get_logger(), "Button found. Moving to APPROACH.");
-            }
-            break;
-        }
-        
-        // case SimpleState::APPROACH: {
-        //     auto final_goal = feasible_standoff_utils::compute_circular_target(button_x, button_y, robot->x, robot->y, 1.25);
-            
-        //     publish_mission_goal(final_goal, false, 0.0, 0.0);
-
-        //     if (base_close_xyw(*robot, final_goal, 0.10, 0.25)) {
-        //         RCLCPP_INFO(this->get_logger(), "Standoff reached -> PRE_PRESS");
-        //         simple_state_ = SimpleState::PRE_PRESS;
-        //     }
-
-        //     break;
-        // }
-        case SimpleState::APPROACH: {
-            auto final_standoff = feasible_standoff_utils::compute_circular_target(button_x, button_y, robot->x, robot->y, 1.25);
-            
-            // 1. Initialize start pose and distance once
-            if (approach_start_dist < 0) {
-                approach_start_dist = std::hypot(final_standoff.position.x - robot->x, final_standoff.position.y - robot->y);
-                approach_start_pose = robot->pose; // Store the actual robot pose at start
-            }
-
-            double current_dist = std::hypot(final_standoff.position.x - robot->x, final_standoff.position.y - robot->y);
-            double progress = 1.0 - (current_dist / approach_start_dist);
-            double heading = std::atan2(final_standoff.position.y - robot->y, final_standoff.position.x - robot->x);
-            double final_yaw = feasible_standoff_utils::get_pose_yaw(final_standoff);
-
-            geometry_msgs::msg::Pose current_waypoint;
-
-            // --- 3-WAYPOINT LEAP-FROG ---
-            if (progress < 0.24) {
-                // Target is physically 25% of the way there
-                current_waypoint = interpolate_pose(approach_start_pose, final_standoff, 0.26);
-                publish_mission_goal(current_waypoint, false, 0.225, heading);
-            } 
-            else if (progress < 0.74) {
-                // Target is physically 75% of the way there
-                current_waypoint = interpolate_pose(approach_start_pose, final_standoff, 0.76);
-                publish_mission_goal(current_waypoint, false, 0.25, heading);
-            } 
-            else {
-                // Target is the final standoff
-                current_waypoint = final_standoff;
-                publish_mission_goal(current_waypoint, false, 0.0, 0.0);
-            }
-
-            if (base_close_xyw(*robot, final_standoff, 0.10, 0.20)) {
-                approach_start_dist = -1.0; 
-                simple_state_ = SimpleState::PRE_PRESS;
-            }
-            break;
-        }
-
-
-        case SimpleState::PRE_PRESS: {
-            if (!have_costmap_) {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
-                                    "Waiting for costmap on topic: /local_costmap/costmap...");
-                return; // Exit early since we can't calculate a standoff without a map
-            }
-
-            // Compute feasible standoff ONCE
-            if (standoff_yaw < -900) {
-                standoff_yaw = feasible_standoff_utils::compute_optimized_standoff(
-                    button_x, button_y, robot->x, robot->y, latest_costmap_);
-                if (standoff_yaw < -900) return;
-            }
-
-            target_pose = feasible_standoff_utils::compute_ee_target(button_x, button_y, button_z, standoff_yaw, 0.15);
-
-            set_yaw(target_pose, standoff_yaw);
-
-            publish_mission_goal(target_pose, true, 0.0, 0.0);
-
-            if (ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.02)) {
-                simple_state_ = SimpleState::PRESS;
-                RCLCPP_INFO(this->get_logger(), "PRE_PRESS -> PRESS");
-            }
-            break;
-        }
-
-        case SimpleState::PRESS: {
-            target_pose = feasible_standoff_utils::compute_ee_target(button_x, button_y, button_z-0.05, standoff_yaw, 0.06);
-            set_yaw(target_pose, standoff_yaw);
-
-            publish_mission_goal(target_pose, true, 0.0, 0.0);
-
-            if (ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.025)) {
-                simple_state_ = SimpleState::RETRACT;
-                RCLCPP_INFO(this->get_logger(), "PRESS -> RETRACT");
-            }
-            break;
-        }
-
-        case SimpleState::RETRACT: {
-            auto door = get_complete_door(button_x, button_y);
-            if (!door) return;
-
-            double door_yaw = feasible_standoff_utils::get_pose_yaw(door->center);
-            double target_x = door->pillar.position.x - 0.6 * std::cos(door_yaw);
-            double target_y = door->pillar.position.y - 0.6 * std::sin(door_yaw);
-            
-            target_pose.position.x = target_x;
-            target_pose.position.y = target_y;
-
-            double fixed_angle_to_center = std::atan2(door->center.position.y - target_y, 
-                                                    door->center.position.x - target_x);
-            
-            set_yaw(target_pose, fixed_angle_to_center);
-            publish_mission_goal(target_pose, false, 0.0, 0.0);
-
-            // 3. TRANSITION
-            // Note: 0.05m is a very tight tolerance for a 5-second window. 
-            // If the robot "hunts" at the end, consider 0.1m.
-            if (base_close_xyw(*robot, target_pose, 0.10, 0.15)) {
-                simple_state_ = SimpleState::EXIT;
-                RCLCPP_INFO(this->get_logger(), "RETRACT -> EXIT");
-            }
-            break;
-        }
-
-        // case SimpleState::EXIT: {
-        //     auto door = get_complete_door(button_x, button_y);
-        //     if (!door) return;
-
-        //     double door_yaw = feasible_standoff_utils::get_pose_yaw(door->center);
-        //     double dx = robot->x - door->center.position.x;
-        //     double dy = robot->y - door->center.position.y;
-        //     double progress = dx * std::cos(door_yaw) + dy * std::sin(door_yaw);
-
-        //     double target_offset = 0.0;
-
-        //     // --- 4-STAGE RELAY LOGIC ---
-        //     // We update the target way BEFORE the robot reaches the current one
-        //     // to prevent the quintic "slow-down" phase.
-        //     if (progress < -0.3) {
-        //         target_offset = 0.2;  // Aim for threshold
-        //     } 
-        //     else if (progress < 0.1) {
-        //         target_offset = 0.6;  // Aim for middle of door
-        //     } 
-        //     else if (progress < 0.5) {
-        //         target_offset = 1.2;  // Aim for clearing the frame
-        //     } 
-        //     else {
-        //         target_offset = 1.8;  // The "Deep Clear" target
-        //     }
-
-        //     target_pose.position.x = door->center.position.x + target_offset * std::cos(door_yaw);
-        //     target_pose.position.y = door->center.position.y + target_offset * std::sin(door_yaw);
-        //     set_yaw(target_pose, door_yaw);
-        //     publish_mission_goal(target_pose, false, 0.0, 0.0);
-
-        //     // --- FINAL SUCCESS ---
-        //     // We only need to reach 1.2m to be fully clear of the swing
-        //     if (progress > 1.2) {
-        //         simple_state_ = SimpleState::DONE;
-        //         RCLCPP_INFO(this->get_logger(), "Sprint Complete. Final progress: %.2fm", progress);
-        //     }
-        //     break;
-        // }
-
-        case SimpleState::EXIT: {
-            auto door = get_complete_door(button_x, button_y);
-            if (!door) return;
-
-            double door_yaw = feasible_standoff_utils::get_pose_yaw(door->center);
-            
-            // Calculate robot's progress ALONG the door's axis
-            // P < 0 means robot is in front of the door, P > 0 means robot has passed center
-            double dx = robot->x - door->center.position.x;
-            double dy = robot->y - door->center.position.y;
-            double p = dx * std::cos(door_yaw) + dy * std::sin(door_yaw);
-
-            geometry_msgs::msg::Pose target_pose = door->center;
-
-            // --- SPATIAL RELAY LOGIC ---
-            if (p < -0.1) {
-                // Still in front: Aim for the middle of the door frame
-                target_pose.position.x += 0.2 * std::cos(door_yaw);
-                target_pose.position.y += 0.2 * std::sin(door_yaw);
-                publish_mission_goal(target_pose, false, 0.25, door_yaw);
-            } 
-            else if (p < 0.4) {
-                // Inside the frame: Aim for the "Clearance" point (0.8m past center)
-                target_pose.position.x += 0.8 * std::cos(door_yaw);
-                target_pose.position.y += 0.8 * std::sin(door_yaw);
-                publish_mission_goal(target_pose, false, 0.3, door_yaw);
-            } 
-            else {
-                // Clearing: Aim for final "Deep Clear" point and SLOW DOWN
-                target_pose.position.x += 1.5 * std::cos(door_yaw);
-                target_pose.position.y += 1.5 * std::sin(door_yaw);
-                publish_mission_goal(target_pose, false, 0.0, door_yaw);
-            }
-
-            // --- EXIT CONDITION ---
-            // Successfully cleared if we are 1.2m past the door center
-            if (p > 1.2) {
-                RCLCPP_INFO(this->get_logger(), "Deep Clear achieved. EXIT -> DONE");
-                simple_state_ = SimpleState::DONE;
-            }
-            break;
-        }
-        case SimpleState::DONE: {
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                                "DONE (holding).");
-            break;
-        }
-    }
-}
-
 // ----------------------
 // Helper for Approach
 // ----------------------
 
 // visual for approach standoff
-// void MissionSequencer::publish_feasible_cloud(const std::vector<geometry_msgs::msg::Pose>& poses)
-// {
-//     visualization_msgs::msg::MarkerArray arr;
+void MissionSequencer::publish_feasible_cloud(const std::vector<geometry_msgs::msg::Pose>& poses)
+{
+    visualization_msgs::msg::MarkerArray arr;
 
-//     // Clear previous
-//     visualization_msgs::msg::Marker clear;
-//     clear.action = visualization_msgs::msg::Marker::DELETEALL;
-//     arr.markers.push_back(clear);
+    // Clear previous
+    visualization_msgs::msg::Marker clear;
+    clear.action = visualization_msgs::msg::Marker::DELETEALL;
+    arr.markers.push_back(clear);
 
-//     int id = 0;
-//     for (const auto& p : poses) {
-//         visualization_msgs::msg::Marker m;
-//         // Use the frame the costmap lives in (likely "odom")
-//         m.header.frame_id = latest_costmap_.header.frame_id; 
-//         m.header.stamp = this->now();
-//         m.ns = "feasible_points";
-//         m.id = id++;
-//         m.type = visualization_msgs::msg::Marker::SPHERE;
-//         m.action = visualization_msgs::msg::Marker::ADD;
+    int id = 0;
+    for (const auto& p : poses) {
+        visualization_msgs::msg::Marker m;
+        // Use the frame the costmap lives in (likely "odom")
+        m.header.frame_id = odom_frame_; 
+        m.header.stamp = this->now();
+        m.ns = "feasible_points";
+        m.id = id++;
+        m.type = visualization_msgs::msg::Marker::SPHERE;
+        m.action = visualization_msgs::msg::Marker::ADD;
 
-//         m.pose = p;
-//         m.pose.position.z = 0.05; 
-//         m.scale.x = 0.08; m.scale.y = 0.08; m.scale.z = 0.08;
+        m.pose = p;
+        m.pose.position.z = 0.05; 
+        m.scale.x =  m.scale.y =  m.scale.z = 0.06;
 
-//         m.color.r = 0.0f; m.color.g = 1.0f; m.color.b = 0.0f; m.color.a = 0.8f;
-//         arr.markers.push_back(m);
-//     }
-//     marker_array_pub_->publish(arr);
-// }
+        m.color.r = 0.0f; m.color.g = 1.0f; m.color.b = 0.0f; m.color.a = 0.8f;
+        arr.markers.push_back(m);
+    }
+    marker_array_pub_->publish(arr);
+}
 
 
 
@@ -450,26 +592,64 @@ void MissionSequencer::simple_timer()
 // Vision Marker Parser
 // --------------------
 
-std::optional<geometry_msgs::msg::Pose> MissionSequencer::get_closest_button() {
+// std::optional<geometry_msgs::msg::Pose> MissionSequencer::get_closest_button() {
+//     double best_dist = 1e6;
+//     std::optional<geometry_msgs::msg::Pose> best_pose;
+
+//     auto robot = get_base_position();
+//     if (!robot) return std::nullopt;
+
+//     for (const auto& m : latest_markers_.markers) {
+//         if (m.action == visualization_msgs::msg::Marker::DELETEALL || m.ns.empty()) continue;
+        
+//         if (m.ns.find("button") != std::string::npos) {
+//             // Use robot->x and robot->y from our state struct
+//             double d = std::hypot(m.pose.position.x - robot->x, m.pose.position.y - robot->y);
+//             if (d < best_dist) {
+//                 best_dist = d;
+//                 best_pose = m.pose;
+//             }
+//         }
+//     }
+//     return best_pose;
+// }
+
+std::optional<ButtonInfo> MissionSequencer::get_closest_button() {
     double best_dist = 1e6;
-    std::optional<geometry_msgs::msg::Pose> best_pose;
+    std::optional<ButtonInfo> best_found;
 
     auto robot = get_base_position();
     if (!robot) return std::nullopt;
 
     for (const auto& m : latest_markers_.markers) {
+        // Skip metadata/empty markers
         if (m.action == visualization_msgs::msg::Marker::DELETEALL || m.ns.empty()) continue;
         
+        // Search for the prefix "button"
         if (m.ns.find("button") != std::string::npos) {
-            // Use robot->x and robot->y from our state struct
             double d = std::hypot(m.pose.position.x - robot->x, m.pose.position.y - robot->y);
+            
             if (d < best_dist) {
                 best_dist = d;
-                best_pose = m.pose;
+                ButtonInfo info;
+                info.pose = m.pose;
+
+                // LOGIC: How to decide if it's push or prox?
+                // Option A: Based on namespace content
+                if (m.ns.find("push") != std::string::npos) {
+                    info.type = "push_button";
+                } else if (m.ns.find("prox") != std::string::npos) {
+                    info.type = "prox_button";
+                } else {
+                    // Option B: Default for the green button in your script
+                    info.type = "push_button"; 
+                }
+                
+                best_found = info;
             }
         }
     }
-    return best_pose;
+    return best_found;
 }
 
 std::optional<DoorInfo> MissionSequencer::get_complete_door(double bx, double by) {
@@ -517,7 +697,125 @@ std::optional<DoorInfo> MissionSequencer::get_complete_door(double bx, double by
 int main(int argc, char ** argv)
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<MissionSequencer>());
+    auto sequencer_node = std::make_shared<MissionSequencer>();
+
+    auto mission_count_pub = sequencer_node->create_publisher<std_msgs::msg::Int32>("/completed_mission_count", 10);
+    int current_mission_index = 0;
+
+    BT::BehaviorTreeFactory factory;
+
+    // Registering the nodes and "injecting" the sequencer pointer
+    factory.registerBuilder<SearchForButton>("SearchForButton", 
+        [sequencer_node](const std::string& name, const BT::NodeConfig& config) {
+            return std::make_unique<SearchForButton>(name, config, sequencer_node.get());
+        });
+
+    factory.registerBuilder<ApproachButton>("ApproachButton", 
+        [sequencer_node](const std::string& name, const BT::NodeConfig& config) {
+            return std::make_unique<ApproachButton>(name, config, sequencer_node.get());
+        });
+    
+    factory.registerBuilder<PrePress>("PrePress", 
+        [sequencer_node](const std::string& name, const BT::NodeConfig& config) {
+            return std::make_unique<PrePress>(name, config, sequencer_node.get());
+        });
+
+    factory.registerBuilder<PressButton>("PressButton", 
+        [sequencer_node](const std::string& name, const BT::NodeConfig& config) {
+            return std::make_unique<PressButton>(name, config, sequencer_node.get());
+        });
+
+    factory.registerBuilder<Retract>("Retract", 
+        [sequencer_node](const std::string& name, const BT::NodeConfig& config) {
+            return std::make_unique<Retract>(name, config, sequencer_node.get());
+        });
+
+    factory.registerBuilder<ExitDoor>("ExitDoor", 
+        [sequencer_node](const std::string& name, const BT::NodeConfig& config) {
+            return std::make_unique<ExitDoor>(name, config, sequencer_node.get());
+        });
+
+    // Create a simple XML string directly in code for testing
+    std::string xml_text = R"(
+        <root BTCPP_format="4">
+            <BehaviorTree ID="MainTree">
+                <Sequence name="root_sequence">
+                    
+                    <RetryUntilSuccessful num_attempts="-1">
+                        <Sequence>
+                            <Sleep msec="100"/>
+                            <SearchForButton btn_pose="{button_loc}" btn_type="{button_type}"/>
+                        </Sequence>
+                    </RetryUntilSuccessful>
+
+                    <ReactiveSequence name="adaptive_approach">
+                        <SearchForButton btn_pose="{button_loc}" btn_type="{button_type}"/>
+                        <ApproachButton btn_pose="{button_loc}"/>
+                    </ReactiveSequence>
+
+                    <Sequence name="manipulation_phase">
+                        <PrePress btn_pose="{button_loc}" final_yaw="{locked_yaw}"/>
+                        
+                        <Fallback name="press_selector">
+                            <Sequence name="physical_push_branch">
+                                <Script code=" is_push := (button_type == 'push_button') "/>
+                                <Precondition if="is_push" else="FAILURE">
+                                    <PressButton btn_pose="{button_loc}" locked_yaw="{locked_yaw}" depth="0.07"/>
+                                </Precondition>
+                            </Sequence>
+
+                            <PressButton btn_pose="{button_loc}" locked_yaw="{locked_yaw}" depth="0.12"/>
+                        </Fallback>
+                    </Sequence>
+
+                    <Retract btn_pose="{button_loc}"/>
+                    <ExitDoor btn_pose="{button_loc}"/>
+
+                </Sequence>
+            </BehaviorTree>
+        </root>
+        )";
+
+    auto tree = factory.createTreeFromText(xml_text);
+
+    BT::StdCoutLogger logger_cout(tree);
+
+    // Replacement for your timer: The BT Tick Loop
+    BT::NodeStatus status = BT::NodeStatus::IDLE;
+    rclcpp::Rate rate(10); 
+    while (rclcpp::ok()) {
+        
+        rclcpp::spin_some(sequencer_node);
+        
+        status = tree.tickOnce();
+        
+        if (status == BT::NodeStatus::SUCCESS) {
+            RCLCPP_INFO(sequencer_node->get_logger(), "MISSION %d COMPLETE!", current_mission_index);
+            
+            // 2. Increment and Publish the new mission state
+            current_mission_index++;
+            std_msgs::msg::Int32 msg;
+            msg.data = current_mission_index;
+            mission_count_pub->publish(msg);
+
+            // 3. Reset for the next door
+            tree.haltTree(); 
+            status = BT::NodeStatus::IDLE;
+
+            RCLCPP_INFO(sequencer_node->get_logger(), "BT RESET: Waiting for Mission %d markers...", current_mission_index);
+            
+            // Give Python 500ms to swap markers before we start searching again
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        } 
+        else if (status == BT::NodeStatus::FAILURE) {
+            RCLCPP_ERROR(sequencer_node->get_logger(), "Mission Hard Failure. Resetting to try again.");
+            tree.haltTree();
+            status = BT::NodeStatus::IDLE;
+        }
+
+        rate.sleep();
+    }
+
     rclcpp::shutdown();
     return 0;
 }

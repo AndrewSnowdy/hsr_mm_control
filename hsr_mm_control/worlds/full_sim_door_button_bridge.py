@@ -1,74 +1,125 @@
 #!/usr/bin/env python3
 """
-Bridge to open both door leaves when button is touched.
-Doors open simultaneously, then auto-close after 5 seconds.
+Bridge for all ADA buttons and doors.
+
+Double door (3 buttons):
+  - /button_logic/touched               (room-side)
+  - /button_hallway_logic/touched        (hallway north wall)
+
+Side room door (2 buttons):
+  - /button_side_logic/touched           (hallway-side)
+  - /button_side_interior_logic/touched  (room-side)
 """
 
 import subprocess
 import sys
 import threading
 
-door_opened = False
+double_door_opened = False
+side_door_opened = False
 
 def send_command(topic, value):
-    """Send a single door command."""
     subprocess.run(
         ["ign", "topic", "-t", topic, "-m", "ignition.msgs.Double", "-p", value],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
-def send_door_commands(open_value_left, open_value_right):
-    """Send commands to both doors simultaneously using threads."""
-    t1 = threading.Thread(target=send_command, args=("/model/handicap_door_left/door_cmd", open_value_left))
-    t2 = threading.Thread(target=send_command, args=("/model/handicap_door_right/door_cmd", open_value_right))
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
+# ── Double door ──────────────────────────────────────────────────────────────
 
-def open_then_close():
-    global door_opened
+def open_then_close_double():
+    global double_door_opened
 
-    # Open both doors simultaneously
-    print("Opening doors...")
-    send_door_commands("data: 1.57", "data: -1.57")
-    print("Doors open! Auto-closing in 5 seconds...")
+    print("Opening double doors...")
+    t1 = threading.Thread(target=send_command, args=("/model/handicap_door_left/door_cmd",  "data: 1.57"))
+    t2 = threading.Thread(target=send_command, args=("/model/handicap_door_right/door_cmd", "data: -1.57"))
+    t1.start(); t2.start(); t1.join(); t2.join()
+    print("Double doors open! Auto-closing in 15 seconds...")
 
-    # Wait for doors to fully open (~2s) + hold open for 5s
     threading.Event().wait(15.0)
 
-    # Close both doors simultaneously
-    print("Closing doors...")
-    send_door_commands("data: 0.0", "data: 0.0")
-    print("Doors closed.")
+    print("Closing double doors...")
+    t1 = threading.Thread(target=send_command, args=("/model/handicap_door_left/door_cmd",  "data: 0.0"))
+    t2 = threading.Thread(target=send_command, args=("/model/handicap_door_right/door_cmd", "data: 0.0"))
+    t1.start(); t2.start(); t1.join(); t2.join()
+    print("Double doors closed.")
 
-    # Reset so button can trigger again
-    door_opened = False
+    double_door_opened = False
 
-def handle_button_press():
-    global door_opened
-    if door_opened:
-        print("Doors already opening/open!")
+def handle_double_door(source):
+    global double_door_opened
+    if double_door_opened:
+        print(f"[{source}] Double doors already open, ignoring.")
         return
-    door_opened = True
-    threading.Thread(target=open_then_close, daemon=True).start()
+    double_door_opened = True
+    print(f"[{source}] Button pressed!")
+    threading.Thread(target=open_then_close_double, daemon=True).start()
 
-def main():
-    print("Listening for button presses on /button_logic/touched...")
-    print("Press Ctrl+C to stop.")
+# ── Side room door ───────────────────────────────────────────────────────────
 
+def open_then_close_side():
+    global side_door_opened
+
+    print("Opening side room door...")
+    send_command("/model/side_room_door/door_cmd", "data: 1.57")
+    print("Side door open! Auto-closing in 15 seconds...")
+
+    threading.Event().wait(15.0)
+
+    print("Closing side room door...")
+    send_command("/model/side_room_door/door_cmd", "data: 0.0")
+    print("Side door closed.")
+
+    side_door_opened = False
+
+def handle_side_door(source):
+    global side_door_opened
+    if side_door_opened:
+        print(f"[{source}] Side door already open, ignoring.")
+        return
+    side_door_opened = True
+    print(f"[{source}] Button pressed!")
+    threading.Thread(target=open_then_close_side, daemon=True).start()
+
+# ── Listener ─────────────────────────────────────────────────────────────────
+
+def listen_topic(topic, handler, source):
     process = subprocess.Popen(
-        ["ign", "topic", "-e", "-t", "/button_logic/touched"],
+        ["ign", "topic", "-e", "-t", topic],
         stdout=subprocess.PIPE, text=True, bufsize=1
     )
-
     try:
         for line in process.stdout:
             if "true" in line.lower():
-                handle_button_press()
+                handler(source)
+    finally:
+        process.terminate()
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    print("Listening for all ADA button presses...")
+    print("Press Ctrl+C to stop.\n")
+
+    listeners = [
+        ("/button_logic/touched",              handle_double_door, "room-side double door button"),
+        ("/button_hallway_logic/touched",       handle_double_door, "hallway double door button"),
+        ("/button_side_logic/touched",          handle_side_door,   "hallway side room button"),
+        ("/button_side_interior_logic/touched", handle_side_door,   "interior side room button"),
+    ]
+
+    threads = [
+        threading.Thread(target=listen_topic, args=args, daemon=True)
+        for args in listeners
+    ]
+
+    for t in threads:
+        t.start()
+
+    try:
+        for t in threads:
+            t.join()
     except KeyboardInterrupt:
         print("\nStopping...")
-        process.terminate()
         sys.exit(0)
 
 if __name__ == "__main__":

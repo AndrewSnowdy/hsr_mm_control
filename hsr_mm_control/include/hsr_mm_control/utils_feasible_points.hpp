@@ -21,7 +21,8 @@ namespace feasible_standoff_utils
     double compute_optimized_standoff(
         double bx, double by,
         double rx, double ry, 
-        const nav_msgs::msg::OccupancyGrid &costmap);
+        const nav_msgs::msg::OccupancyGrid &costmap,
+        std::vector<geometry_msgs::msg::Pose>* debug_poses = nullptr);
     
 
     // 2. The Simple Geometric One (Approach)

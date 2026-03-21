@@ -58,14 +58,15 @@ namespace feasible_standoff_utils
     double compute_optimized_standoff(
         double bx, double by,
         double rx, double ry, // New: Current robot location
-        const nav_msgs::msg::OccupancyGrid &costmap)
+        const nav_msgs::msg::OccupancyGrid &costmap,
+        std::vector<geometry_msgs::msg::Pose>* debug_poses)
     {
         // --- Hardcoded Tuning Params ---
-        const double radius = 0.80;        // Distance from button to stand
+        const double radius = 0.63;        // Distance from button to stand
         const int num_samples = 72;        // 5-degree increments
-        const int8_t max_allowed_cost = 15; // Stay away from walls/obstacles
+        const int8_t max_allowed_cost = 1; // Stay away from walls/obstacles
         const double W_cost = 1.0; 
-        const double W_dist = 5.0;
+        const double W_dist = 1.0;
 
         double best_score = std::numeric_limits<double>::infinity();
         double best_yaw = -999.0;
@@ -80,6 +81,26 @@ namespace feasible_standoff_utils
         int8_t c;
         if (!costAtWorld(costmap, gx, gy, c)) continue;
         if (c == -1 || c >= max_allowed_cost) continue;
+
+        if (debug_poses) {
+            geometry_msgs::msg::Pose p;
+            p.position.x = gx;
+            p.position.y = gy;
+            p.position.z = 0.05;
+
+            // Set orientation to face the button
+            double face_button_yaw = std::atan2(by - gy, bx - gx);
+            tf2::Quaternion q;
+            q.setRPY(0, 0, face_button_yaw);
+
+            // Manual assignment instead of toMsg
+            p.orientation.x = q.x();
+            p.orientation.y = q.y();
+            p.orientation.z = q.z();
+            p.orientation.w = q.w();
+
+            debug_poses->push_back(p);
+        }
 
         // 3. Score the point based on cost and distance to robot
         double dist_to_robot = std::hypot(gx - rx, gy - ry);

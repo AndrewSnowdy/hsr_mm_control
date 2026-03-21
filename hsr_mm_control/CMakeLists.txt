@@ -20,6 +20,7 @@ find_package(Eigen3 REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+find_package(behaviortree_cpp REQUIRED)
 
 # custom msg
 # 1. Add the generator package
@@ -111,6 +112,7 @@ ament_target_dependencies(mission_sequencer
 target_link_libraries(mission_sequencer
   "${cpp_typesupport_target}"
   hsr_mm_utils
+  behaviortree_cpp::behaviortree_cpp
 )
 
 

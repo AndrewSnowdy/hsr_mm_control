@@ -131,6 +131,13 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
         q[1] = base_pos_y_;
     }
 
+    auto applyPostSolve = [&](Eigen::VectorXd& q) {
+        if (joint_name_to_id_.count("wrist_flex_joint")) {
+            int qidx = model_.joints[joint_name_to_id_.at("wrist_flex_joint")].idx_q();
+            q[qidx] = -1.0;
+        }
+    };
+
     // Update arm joints from current hardware state (q_map_)
     for (const auto& [name, pos] : q_map_) {
         if (!joint_name_to_id_.count(name)) continue;
@@ -154,6 +161,17 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
 
     // --- 4. ITERATIVE LOOP ---
     for (int i = 0; i < max_iters; ++i) {
+
+
+        if (joint_name_to_id_.count("arm_flex_joint") && joint_name_to_id_.count("wrist_flex_joint")) {
+            int arm_q_idx = model_.joints[joint_name_to_id_.at("arm_flex_joint")].idx_q();
+            int wrist_q_idx = model_.joints[joint_name_to_id_.at("wrist_flex_joint")].idx_q();
+            
+            // On HSR, arm_flex + wrist_flex = -1.57 makes the palm level to the ground
+            q[wrist_q_idx] = -1.57 - q[arm_q_idx];
+        }
+
+        
         // FK and Placement Update
         pinocchio::normalize(model_, q);
         pinocchio::forwardKinematics(model_, data, q);
@@ -165,6 +183,7 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
         // Check for convergence
         if (err.norm() < 1e-3) {
             RCLCPP_INFO(get_logger(), "IK converged in %d iters | final_err: %.6f", i, err.norm());
+            // applyPostSolve(q);
             return q;
         }
 
@@ -223,6 +242,7 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
     }
 
     RCLCPP_WARN(get_logger(), "IK reached timeout (%d iters) without full convergence.", max_iters);
+    // applyPostSolve(q);
     return q; 
 }
 
