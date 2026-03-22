@@ -1,3 +1,5 @@
 geometry_msgs/Pose target_pose
 geometry_msgs/Twist target_velocity
 bool use_ik_mode
+bool force_wrist_flat
+float64 gripper_pos

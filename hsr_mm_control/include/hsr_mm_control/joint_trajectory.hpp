@@ -46,6 +46,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr goal_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr arm_pub_;
+    rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr gripper_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr base_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr state_sub_;
@@ -75,6 +76,9 @@ private:
     double total_expected_time_;
     double current_time_s_;
     double last_goal_vel_ = 0.0;
+
+    double target_gripper_pos_ = -0.1;
+    double last_gripper_goal_ = 0.0;
 
     std::map<std::string, QuinticSpline> splines_;
     std::vector<std::string> arm_joints_;

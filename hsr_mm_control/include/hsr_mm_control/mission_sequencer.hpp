@@ -19,6 +19,7 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <std_msgs/msg/empty.hpp>
 
 // State Definitions
 enum class SimpleState { 
@@ -39,7 +40,8 @@ struct RobotState {
 
 struct DoorInfo {
     geometry_msgs::msg::Pose center;
-    geometry_msgs::msg::Pose pillar;
+    geometry_msgs::msg::Pose pillar1;
+    geometry_msgs::msg::Pose pillar2;
 };
 
 struct ButtonInfo {
@@ -55,7 +57,13 @@ public:
                                              const geometry_msgs::msg::Pose& end, 
                                              double ratio);
                                              
-    void publish_mission_goal(const geometry_msgs::msg::Pose& pose, bool ik_mode, double cruise_speed, double door_yaw);
+    void publish_mission_goal(
+        const geometry_msgs::msg::Pose& pose,
+        bool ik_mode,
+        double cruise_speed,
+        double door_yaw,
+        bool force_wrist_flat = false,
+        double gripper_pos = 0.1);
 
     // --- Math & Checking Helpers ---
     bool base_close_xyw(const RobotState& state, const geometry_msgs::msg::Pose& target, double tol_xy, double tol_w);
@@ -77,6 +85,20 @@ public:
 
 
     void publish_feasible_cloud(const std::vector<geometry_msgs::msg::Pose>& poses);
+
+    double get_door_safe_standoff(const geometry_msgs::msg::Pose& button, 
+                                                const geometry_msgs::msg::Pose& p1, 
+                                                const geometry_msgs::msg::Pose& p2);
+
+
+    bool force_wrist_flat = false;
+    double target_gripper = 0.1;
+    double depth_offset = 0.0;
+    std::string current_mode = "grasp";
+
+    // for can stuff
+    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr grasp_attach_pub_;
+    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr grasp_detach_pub_;
 
 private:
     // --- Core FSM ---

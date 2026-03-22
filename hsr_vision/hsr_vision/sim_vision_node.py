@@ -61,12 +61,8 @@ class SimVisionNode(Node):
             full_array.markers.extend(self.create_door_markers(now, [7.95, -1.5, 0.0], [7.05, -1.5, 0.0], tid=201))
 
         elif self.mission_index == 2:
-            # Pose from Gazebo: 5.3, -4.35, 0.811
             can_pose = [5.3, -4.35, 0.811]
-            
-            # Use your EXISTING create_button_marker helper instead of create_object_marker
-            # This ensures the namespace is "push_button" and the type is SPHERE
-            full_array.markers.append(self.create_button_marker(now, can_pose, tid=202, btn_type="push"))
+            full_array.markers.append(self.create_button_marker(now, can_pose, tid=202, btn_type="coke_can"))
 
         elif self.mission_index == 3: # Fixed variable name
             # Side Room Door - Exiting
@@ -75,8 +71,13 @@ class SimVisionNode(Node):
 
         elif self.mission_index == 4: # Fixed variable name
             # Main Double Doors - Exiting
-            full_array.markers.append(self.create_button_marker(now, [3.06, -1.35, 1.0], tid=103, btn_type="push"))
-            full_array.markers.extend(self.create_door_markers(now, [3.0, -0.05, 0.0], [3.0, -1.005, 0.0], tid=101))
+            full_array.markers.append(self.create_button_marker(now, [4.8, 1.44, 1.0], tid=103, btn_type="push"))
+            full_array.markers.extend(self.create_door_markers(now, [3.0, -1.005, 0.0], [3.0, -0.05, 0.0], tid=101))
+            full_array.markers.extend(self.create_door_markers(now, [3.0, 0.05, 0.0], [3.0, 1.005, 0.0], tid=102))
+
+        elif self.mission_index == 5:
+            can_pose = [-0.83, 0.9, 0.811]
+            full_array.markers.append(self.create_button_marker(now, can_pose, tid=202, btn_type="coke_can"))
 
         self.publisher_.publish(full_array)
 

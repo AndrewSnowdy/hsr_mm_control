@@ -62,7 +62,7 @@ namespace feasible_standoff_utils
         std::vector<geometry_msgs::msg::Pose>* debug_poses)
     {
         // --- Hardcoded Tuning Params ---
-        const double radius = 0.63;        // Distance from button to stand
+        const double radius = 0.61;        // Distance from button to stand
         const int num_samples = 72;        // 5-degree increments
         const int8_t max_allowed_cost = 1; // Stay away from walls/obstacles
         const double W_cost = 1.0; 

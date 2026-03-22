@@ -59,6 +59,10 @@ FinalPoseNode::FinalPoseNode()
             target_vx_world_ = msg->target_velocity.linear.x;
             target_vy_world_ = msg->target_velocity.linear.y;
             target_vw_world_ = msg->target_velocity.angular.z;
+
+            this->force_wrist_flat_ = msg->force_wrist_flat;
+            this->target_gripper_pos_ = msg->gripper_pos;
+            // RCLCPP_INFO(this->get_logger(), "RECIEVED FLAG: %s", msg->force_wrist_flat ? "TRUE" : "FALSE");
             
             // 3. Update Mode
             use_ik_mode_ = msg->use_ik_mode;
@@ -131,13 +135,6 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
         q[1] = base_pos_y_;
     }
 
-    auto applyPostSolve = [&](Eigen::VectorXd& q) {
-        if (joint_name_to_id_.count("wrist_flex_joint")) {
-            int qidx = model_.joints[joint_name_to_id_.at("wrist_flex_joint")].idx_q();
-            q[qidx] = -1.0;
-        }
-    };
-
     // Update arm joints from current hardware state (q_map_)
     for (const auto& [name, pos] : q_map_) {
         if (!joint_name_to_id_.count(name)) continue;
@@ -163,7 +160,8 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
     for (int i = 0; i < max_iters; ++i) {
 
 
-        if (joint_name_to_id_.count("arm_flex_joint") && joint_name_to_id_.count("wrist_flex_joint")) {
+        if (this->force_wrist_flat_) {
+            RCLCPP_INFO_ONCE(this->get_logger(), "IK SOLVER: Wrist Leveling ACTIVE");
             int arm_q_idx = model_.joints[joint_name_to_id_.at("arm_flex_joint")].idx_q();
             int wrist_q_idx = model_.joints[joint_name_to_id_.at("wrist_flex_joint")].idx_q();
             
@@ -171,7 +169,7 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
             q[wrist_q_idx] = -1.57 - q[arm_q_idx];
         }
 
-        
+
         // FK and Placement Update
         pinocchio::normalize(model_, q);
         pinocchio::forwardKinematics(model_, data, q);
@@ -183,7 +181,6 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
         // Check for convergence
         if (err.norm() < 1e-3) {
             RCLCPP_INFO(get_logger(), "IK converged in %d iters | final_err: %.6f", i, err.norm());
-            // applyPostSolve(q);
             return q;
         }
 
@@ -242,7 +239,6 @@ Eigen::VectorXd FinalPoseNode::solveGlobalIK(const Eigen::Vector3d& target_p)
     }
 
     RCLCPP_WARN(get_logger(), "IK reached timeout (%d iters) without full convergence.", max_iters);
-    // applyPostSolve(q);
     return q; 
 }
 
@@ -285,6 +281,17 @@ void FinalPoseNode::tick() {
             q_tucked[arm_name_to_qidx_["arm_lift_joint"]] = 0.01; // 5cm up from floor
         if (arm_name_to_qidx_.count("arm_flex_joint")) 
             q_tucked[arm_name_to_qidx_["arm_flex_joint"]] = -0.01; // Slightly back
+
+
+        if (this->force_wrist_flat_) {
+            RCLCPP_INFO_ONCE(this->get_logger(), "IK SOLVER: Wrist Leveling ACTIVE");
+            int arm_q_idx = model_.joints[joint_name_to_id_.at("arm_flex_joint")].idx_q();
+            int wrist_q_idx = model_.joints[joint_name_to_id_.at("wrist_flex_joint")].idx_q();
+            
+            // On HSR, arm_flex + wrist_flex = -1.57 makes the palm level to the ground
+            q_tucked[wrist_q_idx] = -1.47 - q_tucked[arm_q_idx];
+        }
+
 
         q_goal_ = q_tucked;
         publishGhostPose(q_goal_);
@@ -459,6 +466,11 @@ void FinalPoseNode::publishGhostPose(const Eigen::VectorXd &q_goal)
   js.name.push_back("base_yaw");
   js.position.push_back(std::atan2(q_goal[3], q_goal[2]));
   js.velocity.push_back(target_vw_world_);
+
+
+  js.name.push_back("hand_motor_joint");
+  js.position.push_back(this->target_gripper_pos_);
+  js.velocity.push_back(0.0);
   
   ghost_joint_pub_->publish(js);
 }

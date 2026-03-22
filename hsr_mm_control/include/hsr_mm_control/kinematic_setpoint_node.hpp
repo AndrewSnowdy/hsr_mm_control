@@ -83,6 +83,9 @@ private:
     bool odom_received_ = false;
     bool joints_received_ = false;
 
+    bool force_wrist_flat_ = false;
+    double target_gripper_pos_ = -0.1;
+
     // Ghost Publishing Layout
     std::vector<std::string> ghost_joint_names_;
     std::vector<double> ghost_joint_pos_;

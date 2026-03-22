@@ -64,6 +64,7 @@ JointTrajectoryController::JointTrajectoryController() : Node("joint_trajectory_
 
     arm_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/arm_trajectory_controller/joint_trajectory", 10);
     base_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/omni_base_controller/cmd_vel", 10);
+    gripper_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/gripper_controller/joint_trajectory", 10);
 
     timer_ = this->create_wall_timer(std::chrono::milliseconds(10), std::bind(&JointTrajectoryController::timer_callback, this));
 
@@ -162,13 +163,19 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
         }
     }
 
+    if (goal_pos.count("hand_motor_joint")) {
+        this->target_gripper_pos_ = goal_pos["hand_motor_joint"];
+    }
+    double gripper_drift = std::abs(this->target_gripper_pos_ - this->last_gripper_goal_);
+
+
     // 1. Check for Goal Drift or Velocity Change
     double goal_drift = std::hypot(goal_pos["base_x"] - last_goal_x_, goal_pos["base_y"] - last_goal_y_);
     double target_v_mag = std::hypot(goal_vel["base_x"], goal_vel["base_y"]);
     double vel_change = std::abs(target_v_mag - last_goal_vel_);
 
     // Re-solve if we moved OR if the speed target changed (important for leap-frogging)
-    if (goal_drift < 0.01 && vel_change < 0.05) return;
+    if (goal_drift < 0.01 && vel_change < 0.05 && gripper_drift < 0.01) return;
 
     // 2. Calculate Distance
     double dx = goal_pos["base_x"] - current_base_x_;
@@ -194,11 +201,18 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     // Final T: At least 1.5s for stability, but matches physics for the sprint
     double T_dynamic = std::max({T_kinematic, max_arm_delta / 0.2, 1.5}); 
     
+
+    double raw_goal_yaw = goal_pos["base_yaw"];
+    double delta_yaw = raw_goal_yaw - current_yaw_;
+    while (delta_yaw > M_PI)  delta_yaw -= 2.0 * M_PI;
+    while (delta_yaw < -M_PI) delta_yaw += 2.0 * M_PI;
+    double linearized_goal_yaw = current_yaw_ + delta_yaw;
+
     // 4. Solve Splines
     // Use the captured goal_vel for X, Y, and Yaw
     splines_["base_x"].solve(current_base_x_, goal_pos["base_x"], current_vx_world_, goal_vel["base_x"], 0, 0, T_dynamic);
     splines_["base_y"].solve(current_base_y_, goal_pos["base_y"], current_vy_world_, goal_vel["base_y"], 0, 0, T_dynamic);
-    splines_["base_yaw"].solve(current_yaw_, goal_pos["base_yaw"], current_vw_, goal_vel["base_yaw"], 0, 0, T_dynamic);
+    splines_["base_yaw"].solve(current_yaw_, linearized_goal_yaw, current_vw_, goal_vel["base_yaw"], 0, 0, T_dynamic);
 
     for (const auto& name : arm_joints_) {
         splines_[name].solve(current_arm_positions_[name], goal_pos[name], current_arm_velocities_[name], goal_vel[name], 0, 0, T_dynamic);
@@ -256,7 +270,7 @@ void JointTrajectoryController::timer_callback() {
 
     // Failsafe
     double pos_error = std::hypot(target_x - current_base_x_, target_y - current_base_y_);
-    if (pos_error > 0.25 || std::abs(yaw_err) > 0.5) {
+    if (pos_error > 0.45 || std::abs(yaw_err) > 0.9) {
         RCLCPP_FATAL(get_logger(), "!!! CRITICAL SAFETY VIOLATION !!!");
         RCLCPP_FATAL(get_logger(), "Pos Error: %.3fm | Yaw Error: %.3frad", pos_error, std::abs(yaw_err));
         base_pub_->publish(geometry_msgs::msg::Twist());
@@ -323,10 +337,38 @@ void JointTrajectoryController::timer_callback() {
     traj_msg.points.push_back(pnt);
     arm_pub_->publish(traj_msg);
 
+
+    // --- GRIPPER COMMAND --- 
+    if (std::abs(target_gripper_pos_ - last_gripper_goal_) > 0.01) {
+        if (gripper_pub_->get_subscription_count() > 0) {
+            auto grip_msg = trajectory_msgs::msg::JointTrajectory();
+            grip_msg.joint_names = {"hand_motor_joint"};
+
+            trajectory_msgs::msg::JointTrajectoryPoint grip_pnt;
+            grip_pnt.positions.push_back(this->target_gripper_pos_);
+            grip_pnt.time_from_start = rclcpp::Duration::from_seconds(1.0); 
+
+            grip_msg.points.push_back(grip_pnt);
+            gripper_pub_->publish(grip_msg);
+
+            last_gripper_goal_ = target_gripper_pos_;
+            RCLCPP_INFO(this->get_logger(), "SUCCESS: Gripper Command Sent & Received by Controller: %.3f", target_gripper_pos_);
+        } else {
+            // Log this so you can see if the network is the bottleneck
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
+                                "Waiting for gripper controller subscription...");
+        }
+    }
+
+    double c = std::cos(current_yaw_);
+    double s = std::sin(current_yaw_);
+
     // --- BASE PUBLISHING ---
     geometry_msgs::msg::Twist twist;
-    twist.linear.x = vx_world * cos(target_yaw) + vy_world * sin(target_yaw);
-    twist.linear.y = -vx_world * sin(target_yaw) + vy_world * cos(target_yaw);
+    // twist.linear.x = vx_world * cos(target_yaw) + vy_world * sin(target_yaw);
+    // twist.linear.y = -vx_world * sin(target_yaw) + vy_world * cos(target_yaw);
+    twist.linear.x =  vx_world * c + vy_world * s;
+    twist.linear.y = -vx_world * s + vy_world * c;
     twist.angular.z = target_vw + (2.5 * yaw_err);
     
     base_pub_->publish(twist);
