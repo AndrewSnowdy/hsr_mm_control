@@ -25,7 +25,8 @@ setup(
         'console_scripts': [
             'process_node = hsr_vision.process_node:main',
             'inference_node = hsr_vision.inference_node:main',
-            'sim_vision_node = hsr_vision.sim_vision_node:main',
+            'full_sim_vision_node = hsr_vision.full_sim_vision_node:main',
+            'behavior_sim_vision_node = hsr_vision.behavior_sim_vision_node:main',
         ],
     },
 )
