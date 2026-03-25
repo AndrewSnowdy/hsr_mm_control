@@ -108,6 +108,7 @@ from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch.actions import TimerAction
 
 def generate_launch_description():
     declared_arguments = declare_launch_arguments()
@@ -222,6 +223,30 @@ def generate_launch_description():
         condition=IfCondition(is_behavior)
     )
 
+    # 1. The Joint Trajectory Controller
+    joint_traj_node = Node(
+        package='hsr_mm_control',
+        executable='joint_trajectory_node',
+        name='joint_trajectory_node',
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=IfCondition(is_behavior)
+    )
+
+    # 2. The Mission Sequencer
+    mission_sequencer_node = Node(
+        package='hsr_mm_control',
+        executable='mission_sequencer',
+        name='mission_sequencer',
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=IfCondition(is_behavior)
+    )
+
+    # 3. Wrap them both in a 10-second Delay
+    delayed_nodes = TimerAction(
+        period=8.0,
+        actions=[mission_sequencer_node]
+    )
+
     return LaunchDescription(declared_arguments + [
         show_ghost_arg,
         mode_arg,
@@ -233,4 +258,6 @@ def generate_launch_description():
         door_button_bridge_behavior,
         sim_vision_node,
         behavior_vision_node,
+        joint_traj_node,
+        delayed_nodes,
     ])

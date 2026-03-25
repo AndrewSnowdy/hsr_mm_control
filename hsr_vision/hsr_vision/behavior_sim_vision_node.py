@@ -16,12 +16,33 @@ class BehaviorVisionNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+        self.person_waypoints = [
+            (0.0,  6.0, 0.0, 3.14159),
+            (25.0, 6.0, 0.0, 3.14159),
+            (40.0, 0.0, 0.0, 3.14159),
+            (41.0, 0.0, 0.0, 3.14159)
+        ]
+
         self.timer = self.create_timer(0.125, self.timer_callback)
         self.get_logger().info(f"Behavior Vision Node: Starting at mission_index={self.mission_index}")
 
     def mission_cb(self, msg):
         self.mission_index = msg.data
         self.get_logger().info(f"Swapping to Mission Index: {self.mission_index}")
+
+    def get_person_pose_interpolated(self, sim_time_sec):
+        total_cycle = self.person_waypoints[-1][0]
+        t_lookup = sim_time_sec % total_cycle if total_cycle > 0 else sim_time_sec
+
+        for i in range(len(self.person_waypoints) - 1):
+            t1, x1, y1, yaw1 = self.person_waypoints[i]
+            t2, x2, y2, yaw2 = self.person_waypoints[i+1]
+            if t1 <= t_lookup <= t2:
+                alpha = (t_lookup - t1) / (t2 - t1)
+                x = x1 + alpha * (x2 - x1)
+                y = y1 + alpha * (y2 - y1)
+                return x, y, yaw1
+        return self.person_waypoints[-1][1], self.person_waypoints[-1][2], self.person_waypoints[-1][3]
 
     def get_robot_pose(self):
         try:
@@ -35,6 +56,7 @@ class BehaviorVisionNode(Node):
         if not pos: return
 
         now = self.get_clock().now().to_msg()
+        sim_time_sec = now.sec + (now.nanosec / 1e9)
         full_array = MarkerArray()
 
         clear_marker = Marker()
@@ -52,6 +74,9 @@ class BehaviorVisionNode(Node):
             full_array.markers.append(self.create_button_marker(now, [3.06, 1.35, 1.0], tid=103, btn_type="push"))
             full_array.markers.extend(self.create_door_markers(now, [3.0, -1.005, 0.0], [3.0, -0.05, 0.0], tid=101))
             full_array.markers.extend(self.create_door_markers(now, [3.0,  0.05, 0.0], [3.0,  1.005, 0.0], tid=102))
+
+        person_markers = self.create_person_prediction_markers(now, sim_time_sec)
+        full_array.markers.extend(person_markers)
 
         self.publisher_.publish(full_array)
 
@@ -109,7 +134,46 @@ class BehaviorVisionNode(Node):
         markers.append(arrow)
 
         return markers
+    
+    def create_person_prediction_markers(self, timestamp, sim_time_sec):
+        markers = []
+        pred_steps = 4
+        pred_dt = 0.3
 
+        for step in range(pred_steps):
+            # Interpolate into the "future"
+            future_t = sim_time_sec + (step * pred_dt)
+            px, py, pyaw = self.get_person_pose_interpolated(future_t)
+
+            m = Marker()
+            m.header.frame_id = "odom"
+            m.header.stamp = timestamp
+            m.ns = "people"
+            m.id = step
+            m.type = Marker.CYLINDER
+            m.action = Marker.ADD
+            
+            # Position
+            m.pose.position.x = px
+            m.pose.position.y = py
+            m.pose.position.z = 0.01 # Flat on ground like your real system
+            
+            # Rotation
+            m.pose.orientation.z = math.sin(pyaw / 2.0)
+            m.pose.orientation.w = math.cos(pyaw / 2.0)
+            
+            # Scale fades out for future steps
+            scale_factor = 1.0 - (step / (pred_steps + 1))
+            m.scale.x = m.scale.y = 0.7 * scale_factor
+            m.scale.z = 0.02
+            
+            # Color matches your real class_config ["person"]
+            # Fades alpha for future steps
+            m.color.r, m.color.g, m.color.b = 0.2, 0.4, 1.0
+            m.color.a = float(max(0.1, 0.7 - 0.1 * step))
+            
+            markers.append(m)
+        return markers
 
 def main(args=None):
     rclpy.init(args=args)

@@ -21,17 +21,6 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <std_msgs/msg/empty.hpp>
 
-// State Definitions
-enum class SimpleState { 
-    MANUAL, 
-    APPROACH, 
-    PRE_PRESS, 
-    PRESS, 
-    RETRACT, 
-    EXIT, 
-    DONE 
-};
-
 struct RobotState {
     double x, y, z;
     double yaw;
@@ -52,6 +41,8 @@ struct ButtonInfo {
 class MissionSequencer : public rclcpp::Node {
 public:
     MissionSequencer();
+
+    void set_current_door_target(const DoorInfo& door) { current_door_target_ = door; }
 
     geometry_msgs::msg::Pose interpolate_pose(const geometry_msgs::msg::Pose& start, 
                                              const geometry_msgs::msg::Pose& end, 
@@ -99,14 +90,17 @@ public:
     // for can stuff
     rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr grasp_attach_pub_;
     rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr grasp_detach_pub_;
+    bool is_door_path_blocked();
 
 private:
     // --- Core FSM ---
     void simple_timer();
-    SimpleState simple_state_{SimpleState::MANUAL};
 
     // --- Mission Goal Helper ---
     rclcpp::Publisher<hsr_mm_control::msg::MissionGoal>::SharedPtr mission_pub_;
+
+    visualization_msgs::msg::MarkerArray::ConstSharedPtr last_person_marker_;
+    std::optional<DoorInfo> current_door_target_;
 
 
     
@@ -120,10 +114,11 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Pose>::SharedPtr target_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr door_lock_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_array_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr safety_zone_pub_;
 
     // --- Robot/Environment Data ---
     nav_msgs::msg::OccupancyGrid latest_costmap_;
-    visualization_msgs::msg::MarkerArray latest_markers_;
+    visualization_msgs::msg::MarkerArray::ConstSharedPtr latest_markers_ptr_;
     bool have_costmap_{false};
     bool mission_locked_{false};
 
