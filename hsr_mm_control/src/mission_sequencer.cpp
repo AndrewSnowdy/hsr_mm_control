@@ -854,7 +854,10 @@ bool MissionSequencer::is_door_path_blocked() {
 
             // 4. Check bounds in the LOCAL frame
             // Now "x" is always forward/backward through the door, "y" is side-to-side
-            if (std::abs(x_local) < 1.2 && std::abs(y_local) < 1.0) {
+            bool in_x_range = (x_local > -0.3 && x_local < 1.0); 
+            bool in_y_range = (std::abs(y_local) < 0.7);
+
+            if (in_x_range && in_y_range) {
                 blocked = true;
                 break;
             }
@@ -866,14 +869,25 @@ bool MissionSequencer::is_door_path_blocked() {
     zone_marker.header.frame_id = odom_frame_;
     zone_marker.header.stamp = this->now();
     zone_marker.type = visualization_msgs::msg::Marker::CUBE;
-    
-    // Position and ORIENTATION match the door
-    zone_marker.pose = current_door_target_->center; 
-    zone_marker.pose.position.z = 0.01; // Lay it flat on the floor
 
-    zone_marker.scale.x = 2.4; // Total length (1.2 * 2)
-    zone_marker.scale.y = 2.0; // Total width (1.0 * 2)
+    // Determine total dimensions based on the logic above
+    double front_x = 0.8;
+    double back_x = 0.3;
+    double width_y = 0.7;
+
+    zone_marker.scale.x = front_x + back_x; // Total length
+    zone_marker.scale.y = width_y * 2.0;    // Total width
     zone_marker.scale.z = 0.02;
+
+    // Offset the center so it aligns with the asymmetric bounds
+    // We shift it forward by half the difference between front and back
+    double x_offset = (front_x - back_x) / 2.0;
+
+    // Apply rotation to the offset before adding to door center
+    zone_marker.pose = current_door_target_->center;
+    zone_marker.pose.position.x += x_offset * std::cos(door_yaw);
+    zone_marker.pose.position.y += x_offset * std::sin(door_yaw);
+    zone_marker.pose.position.z = 0.01;
 
     zone_marker.color.a = 0.3;
     zone_marker.color.r = blocked ? 1.0 : 0.0;
@@ -957,66 +971,66 @@ int main(int argc, char ** argv)
             return std::make_unique<IsPathClear>(name, config, sequencer_node.get());
         });
 
-
     std::string xml_text = R"(
-        <root BTCPP_format="4">
-            <BehaviorTree ID="MainTree">
-                <Sequence name="root_sequence">
-
-                    <RetryUntilSuccessful num_attempts="-1">
-                        <Sequence>
-                            <Sleep msec="100"/>
-                            <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
-                        </Sequence>
-                    </RetryUntilSuccessful>
-
-                    <ReactiveSequence name="adaptive_approach">
+    <root BTCPP_format="4">
+        <BehaviorTree ID="MainTree">
+            <Sequence name="root_sequence">
+                <RetryUntilSuccessful num_attempts="-1">
+                    <Sequence>
+                        <Sleep msec="100"/>
                         <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
-                        <ApproachButton btn_pose="{target_loc}"/>
-                    </ReactiveSequence>
+                    </Sequence>
+                </RetryUntilSuccessful>
 
-                    <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
+                <ReactiveSequence name="adaptive_approach">
+                    <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
+                    <ApproachButton btn_pose="{target_loc}"/>
+                </ReactiveSequence>
+                <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
 
-                    <Fallback name="action_selector">
+                <Fallback name="action_selector">
+                    
+                    <Sequence name="grasp_branch">
+                        <Precondition if="target_type == 'coke_can'" else="FAILURE">
+                            <Sequence>
+                                <GraspAndRetract btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.04"/>
+                                <Script code=" is_carrying := true; target_gripper := -0.1 "/>
+                            </Sequence>
+                        </Precondition>
+                    </Sequence>
+
+                    <Sequence name="door_full_sequence">
+                        <Fallback name="press_selector">
+                            <Sequence name="push_branch">
+                                <Script code=" is_push := (target_type == 'push_button') "/>
+                                <Precondition if="is_push" else="FAILURE">
+                                    <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.085"/>
+                                </Precondition>
+                            </Sequence>
+                            <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.12"/>
+                        </Fallback>
                         
-                        <Sequence name="grasp_branch">
-                            <Precondition if="target_type == 'coke_can'" else="FAILURE">
-                                <Sequence>
-                                    
-                                    <GraspAndRetract btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.04"/>
-                                    
-                                    <Script code=" is_carrying := true; target_gripper := -0.1 "/>
-                                </Sequence>
-                            </Precondition>
-                        </Sequence>
-
-                        <Sequence name="door_full_sequence">
-                            <Fallback name="press_selector">
-                                <Sequence name="push_branch">
-                                    <Script code=" is_push := (target_type == 'push_button') "/>
-                                    <Precondition if="is_push" else="FAILURE">
-                                        <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.085"/>
-                                    </Precondition>
-                                </Sequence>
-                                <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.12"/>
-                            </Fallback>
-                            
-
+                        <Sequence name="universal_exit_logic">
                             <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
-
-                            <ReactiveSequence name="guarded_exit">
-                                <IsPathClear />
-                                <ExitDoor door_info="{door_data}"/>
-                            </ReactiveSequence>
-
-
+                            <RetryUntilSuccessful num_attempts="-1">
+                                <Fallback name="exit_or_wait">
+                                    <ReactiveSequence name="guarded_exit">
+                                        <IsPathClear />
+                                        <ExitDoor door_info="{door_data}"/>
+                                    </ReactiveSequence>
+                                    <ForceFailure>
+                                        <Sequence name="safety_standby">
+                                            <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
+                                            <Sleep msec="500"/>
+                                        </Sequence>
+                                    </ForceFailure>
+                                </Fallback>
+                            </RetryUntilSuccessful>
                         </Sequence>
-
-                    </Fallback>
-
-                </Sequence>
-            </BehaviorTree>
-        </root>
+                    </Sequence> </Fallback>
+            </Sequence>
+        </BehaviorTree>
+    </root>
     )";
 
     auto tree = factory.createTreeFromText(xml_text);

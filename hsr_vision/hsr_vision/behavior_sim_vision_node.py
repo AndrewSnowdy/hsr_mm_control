@@ -19,7 +19,7 @@ class BehaviorVisionNode(Node):
         self.person_waypoints = [
             (0.0,  6.0, 0.0, 3.14159),
             (25.0, 6.0, 0.0, 3.14159),
-            (40.0, 0.0, 0.0, 3.14159),
+            (32.0, 0.0, 0.0, 3.14159),
             (41.0, 0.0, 0.0, 3.14159)
         ]
 
@@ -69,11 +69,11 @@ class BehaviorVisionNode(Node):
             full_array.markers.extend(self.create_door_markers(now, [3.0, -0.05, 0.0], [3.0, -1.005, 0.0], tid=101))
             full_array.markers.extend(self.create_door_markers(now, [3.0, 1.005, 0.0], [3.0,  0.05, 0.0], tid=102))
 
-        elif self.mission_index == 1:
-            # Exiting: back-left button, doors flipped
-            full_array.markers.append(self.create_button_marker(now, [3.06, 1.35, 1.0], tid=103, btn_type="push"))
-            full_array.markers.extend(self.create_door_markers(now, [3.0, -1.005, 0.0], [3.0, -0.05, 0.0], tid=101))
-            full_array.markers.extend(self.create_door_markers(now, [3.0,  0.05, 0.0], [3.0,  1.005, 0.0], tid=102))
+        # elif self.mission_index == 1:
+        #     # Exiting: back-left button, doors flipped
+        #     full_array.markers.append(self.create_button_marker(now, [3.06, 1.35, 1.0], tid=103, btn_type="push"))
+        #     full_array.markers.extend(self.create_door_markers(now, [3.0, -1.005, 0.0], [3.0, -0.05, 0.0], tid=101))
+        #     full_array.markers.extend(self.create_door_markers(now, [3.0,  0.05, 0.0], [3.0,  1.005, 0.0], tid=102))
 
         person_markers = self.create_person_prediction_markers(now, sim_time_sec)
         full_array.markers.extend(person_markers)

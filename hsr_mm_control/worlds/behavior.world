@@ -244,7 +244,7 @@
           </waypoint>
 
           <waypoint>
-            <time>40.0</time>
+            <time>32.0</time>
             <pose>0.0 0 1.0 0 0 3.14159</pose>
           </waypoint>
 
