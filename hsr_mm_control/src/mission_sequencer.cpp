@@ -47,7 +47,7 @@ public:
                                     "BT: Found button, but door pillars not seen.");
             }
 
-            RCLCPP_INFO(s_->get_logger(), "BT: Found %s! Passing to Blackboard.", btn_result->type.c_str());
+            // RCLCPP_INFO(s_->get_logger(), "BT: Found %s! Passing to Blackboard.", btn_result->type.c_str());
             return BT::NodeStatus::SUCCESS;
         }
         
@@ -103,16 +103,17 @@ public:
         double progress = 1.0 - (current_dist / start_dist_);
         double heading = std::atan2(final_standoff.position.y - robot->y, final_standoff.position.x - robot->x);
 
-        if (progress < 0.24) {
-            auto next_waypoint = s_->interpolate_pose(start_pose_, final_standoff, 0.26);
-            s_->publish_mission_goal(next_waypoint, false, 0.225, heading, false, gripper);
+        if (progress < 0.25) {
+            auto next_waypoint = s_->interpolate_pose(start_pose_, final_standoff, 0.33);
+            s_->publish_mission_goal(next_waypoint, false, 0.1, heading, false, 1.0);
         } else if (progress < 0.74) {
-            auto next_waypoint = s_->interpolate_pose(start_pose_, final_standoff, 0.76);
-            s_->publish_mission_goal(next_waypoint, false, 0.25, heading, false, gripper);
+            auto next_waypoint = s_->interpolate_pose(start_pose_, final_standoff, 0.80);
+            s_->publish_mission_goal(next_waypoint, false, 0.1, heading, false, 1.0);
         } else {
-            s_->publish_mission_goal(final_standoff, false, 0.0, 0.0, false, gripper);
+            s_->publish_mission_goal(final_standoff, false, 0.0, 0.0, false, 0.1);
         }
 
+        // s_->publish_mission_goal(final_standoff, false, 0.0, 0.0, false, gripper);
         // The "Spatial Switch" trigger
         if (s_->base_close_xyw(*robot, final_standoff, 0.10, 0.20)) {
             RCLCPP_INFO(s_->get_logger(), "BT: Approach Complete.");
@@ -1036,7 +1037,7 @@ int main(int argc, char ** argv)
     auto tree = factory.createTreeFromText(xml_text);
 
 
-    BT::StdCoutLogger logger_cout(tree);
+    // BT::StdCoutLogger logger_cout(tree);
 
     // Replacement for your timer: The BT Tick Loop
     BT::NodeStatus status = BT::NodeStatus::IDLE;

@@ -51,6 +51,11 @@ private:
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr state_sub_;
 
+    // Variables to monitor the "Fused" (Lidar/Map) Odom
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr switched_odom_sub_;
+    double wheel_base_x_ = 0.0, wheel_base_y_ = 0.0;
+    double switched_vx_ = 0.0, switched_vy_ = 0.0;
+
     // To store the real-time state of the robot
     std::map<std::string, double> current_arm_positions_;
     std::map<std::string, double> current_arm_velocities_;

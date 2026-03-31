@@ -45,10 +45,24 @@ JointTrajectoryController::JointTrajectoryController() : Node("joint_trajectory_
     );
 
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        "/odom",
-        // "/omni_base_controller/wheel_odom", // since /odom is not published (issues with lidar)
+        // "/switched_odom",
+        "/omni_base_controller/wheel_odom",
          10,
         std::bind(&JointTrajectoryController::odom_callback, this, std::placeholders::_1)
+    );
+
+    // for testing 
+    switched_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        "/switched_odom", 10,
+        [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+            // this->switched_x_ = msg->pose.pose.position.x;
+            // this->switched_y_ = msg->pose.pose.position.y;
+            current_base_x_ = msg->pose.pose.position.x;
+            current_base_y_ = msg->pose.pose.position.y;
+            
+            this->switched_vx_ = msg->twist.twist.linear.x;
+            this->switched_vy_ = msg->twist.twist.linear.y;
+        }
     );
 
     state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
@@ -73,81 +87,28 @@ JointTrajectoryController::JointTrajectoryController() : Node("joint_trajectory_
 }
 
 void JointTrajectoryController::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-    current_base_x_ = msg->pose.pose.position.x;
-    current_base_y_ = msg->pose.pose.position.y;
+    // current_base_x_ = msg->pose.pose.position.x;
+    // current_base_y_ = msg->pose.pose.position.y;
+    wheel_base_x_ = msg->pose.pose.position.x;
+    wheel_base_y_ = msg->pose.pose.position.y;
 
     current_vx_ = msg->twist.twist.linear.x;
     current_vy_ = msg->twist.twist.linear.y;
     current_vw_ = msg->twist.twist.angular.z;
 
+    // Update yaw FIRST
     tf2::Quaternion q(msg->pose.pose.orientation.x, msg->pose.pose.orientation.y,
                       msg->pose.pose.orientation.z, msg->pose.pose.orientation.w);
     double r, p, y;
-
-    double cy = std::cos(current_yaw_);
-    double sy = std::sin(current_yaw_);
-
-    current_vx_world_ = current_vx_ * cy - current_vy_ * sy;
-    current_vy_world_ = current_vx_ * sy + current_vy_ * cy;
-
     tf2::Matrix3x3(q).getRPY(r, p, y);
     current_yaw_ = y;
+
+    // THEN rotate body velocities into world frame using correct yaw
+    // double cy = std::cos(current_yaw_);
+    // double sy = std::sin(current_yaw_);
+    // current_vx_world_ = current_vx_ * cy - current_vy_ * sy;
+    // current_vy_world_ = current_vx_ * sy + current_vy_ * cy;
 }
-
-// void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointState::SharedPtr msg) {
-//     std::unordered_map<std::string, double> goal;
-//     for (size_t i = 0; i < msg->name.size(); ++i) goal[msg->name[i]] = msg->position[i];
-
-//     // 1. Check for Goal Drift
-//     double goal_drift = std::hypot(goal["base_x"] - last_goal_x_, goal["base_y"] - last_goal_y_);
-//     if (goal_drift < 0.01) return;
-//     if (is_executing_ && goal_drift < 0.10) return;
-
-//     // 2. Calculate Base Requirements
-//     double dx = goal["base_x"] - current_base_x_;
-//     double dy = goal["base_y"] - current_base_y_;
-//     double L = std::hypot(dx, dy);
-
-//     // 3. NEW: Calculate Arm Requirements
-//     double max_arm_delta = 0.0;
-//     for (const auto& name : arm_joints_) {
-//         double delta = std::abs(goal[name] - current_arm_positions_[name]);
-//         if (delta > max_arm_delta) max_arm_delta = delta;
-//     }
-
-//     // 4. DYNAMIC TIME CALCULATION (Bottleneck-based)
-//     double base_time = L / 0.1;            // Assume 0.15 m/s cruise
-//     double arm_time  = max_arm_delta / 0.1; // Assume 0.2 rad/s cruise
-
-//     // Take the slowest component as the master clock, but keep a floor for smoothness
-//     double T_dynamic = std::max({base_time, arm_time, 2.5}); 
-    
-//     RCLCPP_INFO(get_logger(), "!!! NEW TARGET !!! Base Dist: %.3f m | Arm Move: %.3f rad | Time: %.2f s", 
-//                 L, max_arm_delta, T_dynamic);
-    
-//     last_goal_x_ = goal["base_x"];
-//     last_goal_y_ = goal["base_y"];
-//     total_expected_time_ = T_dynamic;
-
-//     // 5. Solve Splines (Base)
-//     splines_["base_x"].solve(current_base_x_, goal["base_x"], current_vx_world_, 0, 0, 0, T_dynamic);
-//     splines_["base_y"].solve(current_base_y_, goal["base_y"], current_vy_world_, 0, 0, 0, T_dynamic);
-//     splines_["base_yaw"].solve(current_yaw_, goal["base_yaw"], 0, 0, 0, 0, T_dynamic); // or current_vw_
-
-//     // 6. Solve Splines (Arm)
-//     for (const auto& name : arm_joints_) {
-//         double q0 = current_arm_positions_[name];
-//         double qf = goal.count(name) ? goal[name] : q0;
-//         double v0 = current_arm_velocities_[name]; // Use actual current velocity for C2 continuity
-        
-//         splines_[name].solve(q0, qf, v0, 0, 0, 0, T_dynamic);
-//     }
-
-//     last_t_ = this->now();
-//     current_time_s_ = 0.0;
-//     is_executing_ = true;
-// }
-
 
 void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointState::SharedPtr msg) {
     std::unordered_map<std::string, double> goal_pos;
@@ -175,7 +136,17 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     double vel_change = std::abs(target_v_mag - last_goal_vel_);
 
     // Re-solve if we moved OR if the speed target changed (important for leap-frogging)
-    if (goal_drift < 0.01 && vel_change < 0.05 && gripper_drift < 0.01) return;
+    bool is_base_moving = (goal_drift >= 0.02);
+    bool is_vel_changing = (vel_change >= 0.05);
+    bool is_gripper_moving = (gripper_drift >= 0.01);
+
+    if (!is_base_moving && !is_vel_changing && !is_gripper_moving) {
+        // This will print once every 2 seconds
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, 
+            "Goal Ignored (No change): BaseDrift=%.3f, VelChange=%.3f, GripDrift=%.3f", 
+            goal_drift, vel_change, gripper_drift);
+        return;
+    }
 
     // 2. Calculate Distance
     double dx = goal_pos["base_x"] - current_base_x_;
@@ -185,9 +156,9 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     // 3. PHYSICS-BASED TIME (The "Juggling" Fix)
     // We calculate T so the robot moves at a natural speed.
     // We use the max of current speed or target speed to ensure we don't stall.
-    double v_start = std::hypot(current_vx_world_, current_vy_world_);
+    double v_start = std::hypot(current_vx_, current_vy_);
     double v_avg = (v_start + target_v_mag) / 2.0;
-    v_avg = std::max(v_avg, 0.10); // Minimum 0.15m/s to avoid infinite time
+    v_avg = std::clamp(v_avg, 0.1, 0.25); // Minimum 0.1m/s to avoid infinite time
 
     // Golden Rule: Time = Distance / Speed
     double T_kinematic = L / v_avg;
@@ -210,8 +181,8 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
 
     // 4. Solve Splines
     // Use the captured goal_vel for X, Y, and Yaw
-    splines_["base_x"].solve(current_base_x_, goal_pos["base_x"], current_vx_world_, goal_vel["base_x"], 0, 0, T_dynamic);
-    splines_["base_y"].solve(current_base_y_, goal_pos["base_y"], current_vy_world_, goal_vel["base_y"], 0, 0, T_dynamic);
+    splines_["base_x"].solve(current_base_x_, goal_pos["base_x"], current_vx_, goal_vel["base_x"], 0, 0, T_dynamic);
+    splines_["base_y"].solve(current_base_y_, goal_pos["base_y"], current_vy_, goal_vel["base_y"], 0, 0, T_dynamic);
     splines_["base_yaw"].solve(current_yaw_, linearized_goal_yaw, current_vw_, goal_vel["base_yaw"], 0, 0, T_dynamic);
 
     for (const auto& name : arm_joints_) {
@@ -278,15 +249,53 @@ void JointTrajectoryController::timer_callback() {
         return;
     }
 
+    // --- CALCULATE ERRORS ---
+    double err_x = target_x - current_base_x_;
+    double err_y = target_y - current_base_y_;
+    // double pos_error = std::hypot(err_x, err_y);
+
+    // --- PRINT DEBUG EVERY 10 TICKS (100ms) ---
+    static int print_count = 0;
+    if (print_count++ >= 10) {
+        print_count = 0;
+        // Calculate Drifts
+        double map_drift_x = wheel_base_x_ - current_base_x_;
+        double map_drift_y = wheel_base_y_ - current_base_y_;
+        double tracking_err_x = target_x - current_base_x_;
+        double tracking_err_y = target_y - current_base_y_;
+
+        RCLCPP_INFO(get_logger(), "========================================");
+        RCLCPP_INFO(get_logger(), "TIME: %.2fs / %.2fs", current_time_s_, total_expected_time_);
+        
+        RCLCPP_INFO(get_logger(), "--- POSITION ---");
+        RCLCPP_INFO(get_logger(), "  TARGET (Ghost):  X: %6.3f | Y: %6.3f", target_x, target_y);
+        RCLCPP_INFO(get_logger(), "  CONTROL (Wheel): X: %6.3f | Y: %6.3f", wheel_base_x_, wheel_base_y_);
+        RCLCPP_INFO(get_logger(), "  FUSED (Switched): X: %6.3f | Y: %6.3f", current_base_x_, current_base_y_);
+        
+        RCLCPP_INFO(get_logger(), "--- VELOCITY ---");
+        RCLCPP_INFO(get_logger(), "  TARGET (Spline): VX: %6.3f | VY: %6.3f", target_vx, target_vy);
+        RCLCPP_INFO(get_logger(), "  WHEEL (Stable):  VX: %6.3f | VY: %6.3f", current_vx_, current_vy_);
+        RCLCPP_INFO(get_logger(), "  SWITCH (Spiky):  VX: %6.3f | VY: %6.3f", switched_vx_, switched_vy_);
+        
+        RCLCPP_INFO(get_logger(), "--- ERRORS / DRIFT ---");
+        RCLCPP_INFO(get_logger(), "  TRACKING ERROR:  %6.3fm", std::hypot(tracking_err_x, tracking_err_y));
+        RCLCPP_INFO(get_logger(), "  MAP DRIFT:       %6.3fm", std::hypot(map_drift_x, map_drift_y));
+        
+        if (std::abs(switched_vx_) > 2.0) {
+            RCLCPP_WARN(get_logger(), "  [!] SWITCHED ODOM VELOCITY SPIKE DETECTED");
+        }
+        RCLCPP_INFO(get_logger(), "========================================");
+    }
+
     
 
     // PD Controller (Gains: kp=3.0, kd=0.1)
-    double vx_world = target_vx + 3.0 * (target_x - current_base_x_) + 0.1 * (target_vx - current_vx_world_);
-    double vy_world = target_vy + 3.0 * (target_y - current_base_y_) + 0.1 * (target_vy - current_vy_world_);
+    double vx_world = target_vx + 2.0 * err_x + 0.01 * (target_vx - current_vx_);
+    double vy_world = target_vy + 2.0 * err_y + 0.01 * (target_vy - current_vy_);
 
     
 
-    const double MAX_VEL = 0.8; // m/s
+    const double MAX_VEL = 2.2; // m/s
     double current_speed = std::hypot(vx_world, vy_world);
 
     // Failsafe
@@ -297,45 +306,45 @@ void JointTrajectoryController::timer_callback() {
         return;
     }
 
-    // // --- UPDATED ARM CONTROL (Decoupled Frequency) ---
-    // arm_pub_counter_++;
-    // if (arm_pub_counter_ >= 20) { // Publish arm goal every 200ms
-    //     arm_pub_counter_ = 0;
+    // --- UPDATED ARM CONTROL (Decoupled Frequency) ---
+    arm_pub_counter_++;
+    if (arm_pub_counter_ >= 5) { // Publish arm goal every 200ms
+        arm_pub_counter_ = 0;
 
-    //     auto traj_msg = trajectory_msgs::msg::JointTrajectory();
-    //     traj_msg.joint_names = arm_joints_;
-    //     traj_msg.header.stamp = this->now();
+        auto traj_msg = trajectory_msgs::msg::JointTrajectory();
+        traj_msg.joint_names = arm_joints_;
+        traj_msg.header.stamp = this->now();
 
-    //     trajectory_msgs::msg::JointTrajectoryPoint pnt;
+        trajectory_msgs::msg::JointTrajectoryPoint pnt;
         
-    //     // Use a longer look-ahead for the hardware buffer (e.g., 200ms)
-    //     double look_ahead = 0.1; 
-    //     double eval_time = current_time_s_ + look_ahead;
+        // Use a longer look-ahead for the hardware buffer (e.g., 200ms)
+        double look_ahead = 0.05; 
+        double eval_time = current_time_s_ + look_ahead;
 
-    //     for (const auto& name : arm_joints_) {
-    //         pnt.positions.push_back(splines_[name].get_pos(eval_time));
-    //         pnt.velocities.push_back(splines_[name].get_vel(eval_time));
-    //     }
+        for (const auto& name : arm_joints_) {
+            pnt.positions.push_back(splines_[name].get_pos(eval_time));
+            // pnt.velocities.push_back(splines_[name].get_vel(eval_time));
+        }
 
-    //     RCLCPP_INFO(get_logger(), "Sending Arm Lift: %.3f | Arm Flex: %.3f", pnt.positions[0], pnt.positions[1]);
+        // RCLCPP_INFO(get_logger(), "Sending Arm Lift: %.3f | Arm Flex: %.3f", pnt.positions[0], pnt.positions[1]);
         
-    //     pnt.time_from_start = rclcpp::Duration::from_seconds(look_ahead);
-    //     traj_msg.points.push_back(pnt);
+        pnt.time_from_start = rclcpp::Duration::from_seconds(look_ahead);
+        traj_msg.points.push_back(pnt);
         
-    //     arm_pub_->publish(traj_msg);
-    // }
-
-    // --- ARM CONTROL (Synchronized) ---
-    auto traj_msg = trajectory_msgs::msg::JointTrajectory();
-    traj_msg.joint_names = arm_joints_;
-    trajectory_msgs::msg::JointTrajectoryPoint pnt;
-    for (const auto& name : arm_joints_) {
-        pnt.positions.push_back(splines_[name].get_pos(current_time_s_));
-        pnt.velocities.push_back(splines_[name].get_vel(current_time_s_)); // Pure rad/s
+        arm_pub_->publish(traj_msg);    
     }
-    pnt.time_from_start = rclcpp::Duration::from_seconds(dt);
-    traj_msg.points.push_back(pnt);
-    arm_pub_->publish(traj_msg);
+
+    // // --- ARM CONTROL (Synchronized) ---
+    // auto traj_msg = trajectory_msgs::msg::JointTrajectory();
+    // traj_msg.joint_names = arm_joints_;
+    // trajectory_msgs::msg::JointTrajectoryPoint pnt;
+    // for (const auto& name : arm_joints_) {
+    //     pnt.positions.push_back(splines_[name].get_pos(current_time_s_));
+    //     pnt.velocities.push_back(splines_[name].get_vel(current_time_s_)); // Pure rad/s
+    // }
+    // pnt.time_from_start = rclcpp::Duration::from_seconds(dt);
+    // traj_msg.points.push_back(pnt);
+    // arm_pub_->publish(traj_msg);
 
 
     // --- GRIPPER COMMAND --- 

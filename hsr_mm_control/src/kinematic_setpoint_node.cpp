@@ -31,24 +31,6 @@ FinalPoseNode::FinalPoseNode()
   target_vw_world_(0.0)
 {
 
-    // target_sub_ = this->create_subscription<geometry_msgs::msg::Pose>(
-    //     "/waypoint_target", 10, 
-    //     [this](const geometry_msgs::msg::Pose::SharedPtr msg) {
-    //         current_target_ = *msg;
-    //         has_target_ = true;
-    //         // Optional: Trigger the IK solve immediately when a new point arrives
-    //     }
-    // );
-
-    // mode_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-    //     "/use_ik_mode", 10, 
-    //     [this](const std_msgs::msg::Bool::SharedPtr msg) {
-    //         use_ik_mode_ = msg->data;
-    //         // RCLCPP_INFO(this->get_logger(), "Mode Switched: %s", 
-    //         //             use_ik_mode_ ? "IK MANIPULATION" : "TUCKED NAVIGATION");
-    //     }
-    // );
-
     mission_sub_ = this->create_subscription<hsr_mm_control::msg::MissionGoal>(
         "/mission_command", 10, 
         [this](const hsr_mm_control::msg::MissionGoal::SharedPtr msg) {
@@ -80,7 +62,10 @@ FinalPoseNode::FinalPoseNode()
     });
 
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    "/odom", 10, [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+    // "/odom",
+    "/switched_odom",
+    // "/omni_base_controller/wheel_odom",
+     10, [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
         base_pos_x_ = msg->pose.pose.position.x;
         base_pos_y_ = msg->pose.pose.position.y;
 
