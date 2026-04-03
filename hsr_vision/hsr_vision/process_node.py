@@ -26,6 +26,10 @@ class HSRPersonTracker(Node):
         self.scan_topic = "/scan"
         self.base_frame = "odom"
 
+        self.img_border_buffer = 15  # Pixels from the edge
+        self.img_width = 640         # Standard HSR X-Res
+        self.img_height = 480        # Standard HSR Y-Res
+
         # --- Class-Specific Configs ---
         self.class_configs = {
             "person":      {"thresh": 2,  "dist": 1.2, "timeout": 0.5, "color": (0.2, 0.4, 1.0)}, # Blue
@@ -96,50 +100,22 @@ class HSRPersonTracker(Node):
         for det in msg.detections:
             label = det.results[0].hypothesis.class_id.lower()
             if label not in self.class_configs: continue
-            # if label == "door":
-            #     # 1. Get 2D Edges from the Bounding Box
-            #     yaw_offset = -0.13
-            #     pixel_inset = 5
 
-            #     # 2. Calculate coordinates moved inward from the edges
-            #     u_l_safe = int(det.bbox.center.position.x - det.bbox.size_x / 2.0) + pixel_inset
-            #     u_r_safe = int(det.bbox.center.position.x + det.bbox.size_x / 2.0) - pixel_inset
-            #     v_bottom = int(det.bbox.center.position.y + det.bbox.size_y / 2.0)
-
-            #     # 2. Get Depth from Depth Map
-            #     z_l = self._stable_depth_at(u_l_safe, v_bottom, win=6)
-            #     z_r = self._stable_depth_at(u_r_safe, v_bottom, win=6)
-                
-            #     x_l_cam = (u_l_safe - self.cx) / self.fx + yaw_offset
-            #     y_l_cam = (v_bottom - self.cy) / self.fy
-                
-            #     # Project Ray R with offset
-            #     x_r_cam = (u_r_safe - self.cx) / self.fx + yaw_offset
-            #     y_r_cam = (v_bottom - self.cy) / self.fy
-
-            #     # Use a depth of 1.0 to create the 3D point in Camera Space
-            #     # We use the optical frame convention (Z-Forward, X-Right, Y-Down)
-            #     if z_l is None:
-            #         z_l = self._get_lidar_dist_at_angle(ang_l)
-            #         if z_l == 5.0:
-            #             self.get_logger().warn(f"Door LEFT edge: No Depth or Lidar hit. Defaulting to 5.0m")
-            #     if z_r is None:
-            #         z_r = self._get_lidar_dist_at_angle(ang_r)
-            #         if z_r == 5.0:
-            #             self.get_logger().warn(f"Door RIGHT edge: No Depth or Lidar hit. Defaulting to 5.0m")
-
-            #     p_l_cam = [x_l_cam * (z_l or temp_z), y_l_cam * (z_l or temp_z), (z_l or temp_z)]
-            #     p_r_cam = [x_r_cam * (z_r or temp_z), y_r_cam * (z_r or temp_z), (z_r or temp_z)]
-
-            #     # --- THE TF STEP: Transform from 'head_rgbd_sensor_link' to 'odom' ---
-            #     # This step automatically accounts for the head's pan/tilt rotation!
-            #     p_l_vis = self._transform_point(p_l_cam, cam_frame, self.base_frame)
-            #     p_r_vis = self._transform_point(p_r_cam, cam_frame, self.base_frame)
             if label == "door":
                 yaw_offset = -0.125
                 u_l = int(det.bbox.center.position.x - det.bbox.size_x / 2.0) + 5
                 u_r = int(det.bbox.center.position.x + det.bbox.size_x / 2.0) - 5
                 v_bottom = int(det.bbox.center.position.y + det.bbox.size_y / 2.0)
+
+                edge_margin = 20
+                img_h, img_w = self.latest_depth.shape[:2]
+
+                is_clipping = (u_l < edge_margin or 
+                               u_r > (img_w - edge_margin))
+
+                if is_clipping:
+                    # self.get_logger().info("Door clipped by frame edge; skipping update to preserve static width.")
+                    continue
 
                 # Calculate angles directly from pixels (no camera depth used here)
                 ang_l = math.atan2((u_l - self.cx), self.fx) + yaw_offset
@@ -164,6 +140,12 @@ class HSRPersonTracker(Node):
                     # --- NEW REFINEMENT STEP ---   
                     # Use your new scan helper to "snap" these points to the physical wall edges
                     p_l, p_r = self._refine_door_with_scan(p_l_vis, p_r_vis)
+
+                    door_width = math.hypot(p_l[0] - p_r[0], p_l[1] - p_r[1])
+                    min_door_w = 0.5
+                    max_door_w = 1.5
+                    if not (min_door_w <= door_width <= max_door_w):
+                        continue
                     
                     # 4. Use the REFINED points for the final observation
                     mid_x = (p_l[0] + p_r[0]) / 2.0
