@@ -114,7 +114,7 @@ class HSRPersonTracker(Node):
                                u_r > (img_w - edge_margin))
 
                 if is_clipping:
-                    # self.get_logger().info("Door clipped by frame edge; skipping update to preserve static width.")
+                    self.get_logger().info("Door clipped by frame edge; skipping update to preserve static width.")
                     continue
 
                 # Calculate angles directly from pixels (no camera depth used here)
@@ -145,6 +145,7 @@ class HSRPersonTracker(Node):
                     min_door_w = 0.5
                     max_door_w = 1.5
                     if not (min_door_w <= door_width <= max_door_w):
+                        self.get_logger().warn("door too large, skipping.")
                         continue
                     
                     # 4. Use the REFINED points for the final observation
