@@ -27,6 +27,7 @@ setup(
             'inference_node = hsr_vision.inference_node:main',
             'full_sim_vision_node = hsr_vision.full_sim_vision_node:main',
             'behavior_sim_vision_node = hsr_vision.behavior_sim_vision_node:main',
+            'behavior2_sim_vision_node = hsr_vision.behavior2_sim_vision_node:main',
         ],
     },
 )

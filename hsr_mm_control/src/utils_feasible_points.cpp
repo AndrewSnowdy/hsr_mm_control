@@ -1,6 +1,7 @@
 #include "hsr_mm_control/utils_feasible_points.hpp"
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
+#include <optional>
 #include <cmath>
 #include <limits>
 
@@ -192,4 +193,90 @@ namespace feasible_standoff_utils
         pose.orientation.w = q.w();
     }
 
+
+    bool is_pose_safe_coords(double wx, double wy, 
+                          const nav_msgs::msg::OccupancyGrid& costmap,
+                          int8_t threshold)
+    {
+        int8_t cost;
+        if (!costAtWorld(costmap, wx, wy, cost)) return true;
+        if (cost == -1) return true;  // unknown = treat as free
+        return cost < threshold;
+    }
+
+    // utils_feasible_points.cpp — add this alongside your other functions
+    geometry_msgs::msg::Pose compute_next_waypoint(
+        double rx, double ry,
+        const geometry_msgs::msg::Pose& goal,
+        const nav_msgs::msg::OccupancyGrid& costmap,
+        double step,
+        double lookahead)
+    {
+        double gx = goal.position.x, gy = goal.position.y;
+        double dx = gx - rx, dy = gy - ry;
+        double dist = std::hypot(dx, dy);
+        if (dist < 1e-3) return goal;
+
+        double ux = dx / dist, uy = dy / dist;
+
+        // 1. Ray-cast toward goal
+        bool blocked = false;
+        double obs_x = 0.0, obs_y = 0.0;
+        for (double d = 0.3; d < std::min(dist, lookahead); d += step) {
+            double tx = rx + ux * d, ty = ry + uy * d;
+            if (!is_pose_safe_coords(tx, ty, costmap)) {
+                obs_x = tx - ux * step;
+                obs_y = ty - uy * step;
+                blocked = true;
+                break;
+            }
+        }
+
+        if (!blocked) return goal;
+
+        // 2. Walk boundary in both directions, return first point with clear LOS to goal
+        auto hug = [&](double sign) -> std::optional<geometry_msgs::msg::Pose> {
+            double hx = obs_x, hy = obs_y;
+            double tang_x = -sign * uy, tang_y = sign * ux;
+
+            for (int i = 0; i < 40; i++) {
+                double nx = hx + tang_x * step;
+                double ny = hy + tang_y * step;
+                if (!is_pose_safe_coords(nx, ny, costmap)) break;
+                hx = nx; hy = ny;
+
+                // Check LOS to goal from here
+                double cdx = gx - hx, cdy = gy - hy;
+                double cdist = std::hypot(cdx, cdy);
+                bool clear = true;
+                for (double s = step; s < cdist; s += step) {
+                    if (!is_pose_safe_coords(hx + (cdx / cdist) * s,
+                                            hy + (cdy / cdist) * s, costmap)) {
+                        clear = false; break;
+                    }
+                }
+                if (clear) {
+                    geometry_msgs::msg::Pose p;
+                    p.position.x = hx; p.position.y = hy; p.position.z = 0.0;
+                    set_pose_yaw(p, std::atan2(gy - hy, gx - hx));
+                    return p;
+                }
+            }
+            return std::nullopt;
+        };
+
+        auto left  = hug(+1.0);
+        auto right = hug(-1.0);
+
+        auto dist_to_goal = [&](const geometry_msgs::msg::Pose& p) {
+            return std::hypot(gx - p.position.x, gy - p.position.y);
+        };
+
+        if (left && right)
+            return dist_to_goal(*left) < dist_to_goal(*right) ? *left : *right;
+        if (left)  return *left;
+        if (right) return *right;
+
+        return goal;  // fallback
+    }
 } // namespace standoff_utils

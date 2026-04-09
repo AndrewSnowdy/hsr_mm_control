@@ -81,6 +81,7 @@ public:
                                                 const geometry_msgs::msg::Pose& p1, 
                                                 const geometry_msgs::msg::Pose& p2);
 
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_array_pub2_;
 
     bool force_wrist_flat = false;
     double target_gripper = 0.1;

@@ -14,7 +14,7 @@ namespace feasible_standoff_utils
     bool costAtWorld(
         const nav_msgs::msg::OccupancyGrid &costmap,
         double wx, double wy,
-        unsigned char &cost);
+        int8_t &cost);
 
     // 1. The Cost-Aware One (Pre-Press)
     // Concept: The best spot considering costmaps and distances
@@ -36,6 +36,19 @@ namespace feasible_standoff_utils
             double bx, double by, double bz, 
             double yaw, double offset);
 
+    // utils_feasible_points.hpp
+
+    bool is_pose_safe_coords(double wx, double wy,
+                            const nav_msgs::msg::OccupancyGrid& costmap,
+                            int8_t threshold = 10);
+
+    geometry_msgs::msg::Pose compute_next_waypoint(
+        double rx, double ry,
+        const geometry_msgs::msg::Pose& goal,
+        const nav_msgs::msg::OccupancyGrid& costmap,
+        double step = 0.05,
+        double lookahead = 2.0);
+    
     double get_pose_yaw(const geometry_msgs::msg::Pose &pose);
     void set_pose_yaw(geometry_msgs::msg::Pose &pose, double yaw);
 

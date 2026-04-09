@@ -19,7 +19,7 @@ def generate_launch_description():
     )
     mode_arg = DeclareLaunchArgument(
         'mode', default_value='full_sim',
-        description='Simulation mode: full_sim | behavior'
+        description='Simulation mode: full_sim | behavior | behavior2'
     )
 
     condition    = LaunchConfiguration('fast_physics')
@@ -35,10 +35,14 @@ def generate_launch_description():
         robot_description_content = f.read()
 
     # --- Mode conditions ---
-    is_full_sim = PythonExpression(["'", mode, "' == 'full_sim'"])
-    is_behavior = PythonExpression(["'", mode, "' == 'behavior'"])
+    is_full_sim     = PythonExpression(["'", mode, "' == 'full_sim'"])
+    is_behavior     = PythonExpression(["'", mode, "' == 'behavior'"])
+    is_behavior2    = PythonExpression(["'", mode, "' == 'behavior2'"])
+    is_any_behavior = PythonExpression(
+        ["'", mode, "' == 'behavior' or '", mode, "' == 'behavior2'"]
+    )
 
-    # --- Gazebo (same as original: UnlessCondition on fast_physics, just world swaps) ---
+    # --- Gazebo ---
     hsrb_gazebo_common_path = os.path.join(
         get_package_share_directory('hsrb_gazebo_launch'),
         'launch/include/hsrb_gazebo_common.launch.py')
@@ -68,7 +72,15 @@ def generate_launch_description():
         ))
     )
 
-    # --- Ghost Robot (unchanged from original) ---
+    hsrb_gazebo_behavior2 = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(hsrb_gazebo_common_path),
+        launch_arguments={**launch_arg_info, **{"world_name": os.path.join(pkg_hsr_mm_control, 'worlds', 'behavior2.world')}}.items(),
+        condition=IfCondition(PythonExpression(
+            ["'", condition, "'.lower() != 'true' and '", mode, "' == 'behavior2'"]
+        ))
+    )
+
+    # --- Ghost Robot ---
     kinematic_setpoint_node = Node(
         package='hsr_mm_control',
         executable='kinematic_setpoint_node',
@@ -90,7 +102,7 @@ def generate_launch_description():
         condition=IfCondition(show_ghost)
     )
 
-    # --- Door Button Bridge (swaps based on mode) ---
+    # --- Door Button Bridges (behavior2 has none) ---
     door_button_bridge_full_sim = ExecuteProcess(
         cmd=['python3', os.path.join(pkg_hsr_mm_control, 'worlds', 'full_sim_door_button_bridge.py')],
         output='screen',
@@ -105,7 +117,7 @@ def generate_launch_description():
         condition=IfCondition(is_behavior)
     )
 
-    # --- Vision Nodes (swaps based on mode) ---
+    # --- Vision Nodes ---
     sim_vision_node = Node(
         package='hsr_vision',
         executable='full_sim_vision_node',
@@ -122,13 +134,23 @@ def generate_launch_description():
         condition=IfCondition(is_behavior)
     )
 
+    behavior2_vision_node = Node(
+        package='hsr_vision',
+        executable='behavior2_sim_vision_node',
+        name='behavior2_sim_vision_node',
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=IfCondition(is_behavior2)
+    )
+
+    # --- Shared behavior nodes (behavior and behavior2) ---
+
     # 1. The Joint Trajectory Controller
     joint_traj_node = Node(
         package='hsr_mm_control',
         executable='joint_trajectory_node',
         name='joint_trajectory_node',
         parameters=[{'use_sim_time': use_sim_time}],
-        condition=IfCondition(is_behavior)
+        condition=IfCondition(is_any_behavior)
     )
 
     # 2. The Mission Sequencer
@@ -137,10 +159,10 @@ def generate_launch_description():
         executable='mission_sequencer',
         name='mission_sequencer',
         parameters=[{'use_sim_time': use_sim_time}],
-        condition=IfCondition(is_behavior)
+        condition=IfCondition(is_any_behavior)
     )
 
-    # 3. Wrap them both in a 10-second Delay
+    # 3. Delayed start for mission sequencer
     delayed_nodes = TimerAction(
         period=8.0,
         actions=[mission_sequencer_node]
@@ -151,12 +173,14 @@ def generate_launch_description():
         mode_arg,
         hsrb_gazebo_full_sim,
         hsrb_gazebo_behavior,
+        hsrb_gazebo_behavior2,
         kinematic_setpoint_node,
         ghost_rsp,
         door_button_bridge_full_sim,
         door_button_bridge_behavior,
         sim_vision_node,
         behavior_vision_node,
+        behavior2_vision_node,
         joint_traj_node,
         delayed_nodes,
     ])
