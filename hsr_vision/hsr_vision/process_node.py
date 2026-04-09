@@ -35,7 +35,7 @@ class HSRPersonTracker(Node):
             "person":      {"thresh": 2,  "dist": 1.2, "timeout": 0.5, "color": (0.2, 0.4, 1.0)}, # Blue
             "prox_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (1.0, 0.0, 0.0)}, # Red
             "push_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (0.0, 1.0, 0.0)}, # Green
-            "door":        {"thresh": 10,  "dist": 0.5, "timeout": 15.0,  "color": (1.0, 0.5, 0.0)}, # orange
+            "door":        {"thresh": 18,  "dist": 0.5, "timeout": 45.0,  "color": (1.0, 0.5, 0.0)}, # orange
             "default":     {"thresh": 5,  "dist": 0.5, "timeout": 1.0, "color": (0.5, 0.5, 0.5)}
 }
 
@@ -102,9 +102,9 @@ class HSRPersonTracker(Node):
             if label not in self.class_configs: continue
 
             if label == "door":
-                yaw_offset = -0.125
-                u_l = int(det.bbox.center.position.x - det.bbox.size_x / 2.0) + 5
-                u_r = int(det.bbox.center.position.x + det.bbox.size_x / 2.0) - 5
+                yaw_offset = -0.1
+                u_l = int(det.bbox.center.position.x - det.bbox.size_x / 2.0) + 10
+                u_r = int(det.bbox.center.position.x + det.bbox.size_x / 2.0) - 10
                 v_bottom = int(det.bbox.center.position.y + det.bbox.size_y / 2.0)
 
                 edge_margin = 20

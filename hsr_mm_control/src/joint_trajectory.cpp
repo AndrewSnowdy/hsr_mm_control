@@ -136,7 +136,7 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     double vel_change = std::abs(target_v_mag - last_goal_vel_);
 
     // Re-solve if we moved OR if the speed target changed (important for leap-frogging)
-    bool is_base_moving = (goal_drift >= 0.02);
+    bool is_base_moving = (goal_drift >= 0.04);
     bool is_vel_changing = (vel_change >= 0.05);
     bool is_gripper_moving = (gripper_drift >= 0.01);
 
@@ -269,13 +269,13 @@ void JointTrajectoryController::timer_callback() {
         
         RCLCPP_INFO(get_logger(), "--- POSITION ---");
         RCLCPP_INFO(get_logger(), "  TARGET (Ghost):  X: %6.3f | Y: %6.3f", target_x, target_y);
-        RCLCPP_INFO(get_logger(), "  CONTROL (Wheel): X: %6.3f | Y: %6.3f", wheel_base_x_, wheel_base_y_);
+        // RCLCPP_INFO(get_logger(), "  CONTROL (Wheel): X: %6.3f | Y: %6.3f", wheel_base_x_, wheel_base_y_);
         RCLCPP_INFO(get_logger(), "  FUSED (Switched): X: %6.3f | Y: %6.3f", current_base_x_, current_base_y_);
         
         RCLCPP_INFO(get_logger(), "--- VELOCITY ---");
         RCLCPP_INFO(get_logger(), "  TARGET (Spline): VX: %6.3f | VY: %6.3f", target_vx, target_vy);
         RCLCPP_INFO(get_logger(), "  WHEEL (Stable):  VX: %6.3f | VY: %6.3f", current_vx_, current_vy_);
-        RCLCPP_INFO(get_logger(), "  SWITCH (Spiky):  VX: %6.3f | VY: %6.3f", switched_vx_, switched_vy_);
+        // RCLCPP_INFO(get_logger(), "  SWITCH (Spiky):  VX: %6.3f | VY: %6.3f", switched_vx_, switched_vy_);
         
         RCLCPP_INFO(get_logger(), "--- ERRORS / DRIFT ---");
         RCLCPP_INFO(get_logger(), "  TRACKING ERROR:  %6.3fm", std::hypot(tracking_err_x, tracking_err_y));

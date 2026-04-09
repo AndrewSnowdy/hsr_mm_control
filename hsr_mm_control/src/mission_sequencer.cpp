@@ -105,10 +105,10 @@ public:
 
         if (progress < 0.25) {
             auto next_waypoint = s_->interpolate_pose(start_pose_, final_standoff, 0.33);
-            s_->publish_mission_goal(next_waypoint, false, 0.1, heading, false, 1.0);
+            s_->publish_mission_goal(next_waypoint, false, 0.1, heading, false, 0.1);
         } else if (progress < 0.74) {
             auto next_waypoint = s_->interpolate_pose(start_pose_, final_standoff, 0.80);
-            s_->publish_mission_goal(next_waypoint, false, 0.1, heading, false, 1.0);
+            s_->publish_mission_goal(next_waypoint, false, 0.1, heading, false, 0.1);
         } else {
             s_->publish_mission_goal(final_standoff, false, 0.0, 0.0, false, 0.1);
         }
@@ -193,7 +193,7 @@ public:
         s_->publish_mission_goal(target_pose, true, 0.0, 0.0, false, gripper);
 
         // 6. Check if EE has arrived (2cm tolerance)
-        if (s_->ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.02)) {
+        if (s_->ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.04)) {
             RCLCPP_INFO(s_->get_logger(), "BT: PrePress Complete. Arm is in position.");
             setOutput("final_yaw", standoff_yaw_);
             return BT::NodeStatus::SUCCESS;
@@ -253,7 +253,7 @@ public:
         s_->publish_mission_goal(press_pose, true, 0.0, 0.0, flat, gripper);
 
         // Arrival check
-        if (s_->ee_close_xyz(*ee_pos, press_pose.position.x, press_pose.position.y, press_pose.position.z, 0.015)) {
+        if (s_->ee_close_xyz(*ee_pos, press_pose.position.x, press_pose.position.y, press_pose.position.z, 0.02)) {
             RCLCPP_INFO(s_->get_logger(), "BT: Press/Wave at depth %.2fm Complete.", target_depth_);
             return BT::NodeStatus::SUCCESS;
         }
@@ -916,7 +916,7 @@ double MissionSequencer::get_door_safe_standoff(const geometry_msgs::msg::Pose& 
 
     // 2. Your Preferred Readability Logic:
     // This effectively "bounces" the standoff between 0.6 and 1.2
-    double standoff = std::max(0.65, std::min(1.75, dist_to_door_line));
+    double standoff = std::max(0.85, std::min(1.75, dist_to_door_line));
 
     return standoff;
 }
