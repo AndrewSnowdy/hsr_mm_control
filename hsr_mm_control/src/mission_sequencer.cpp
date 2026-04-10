@@ -131,6 +131,119 @@ private:
 //     geometry_msgs::msg::Pose start_pose_;
 //     double start_dist_ = -1.0;
 // };
+
+
+// class ApproachButton : public BT::StatefulActionNode {
+// public:
+//     ApproachButton(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+//         : BT::StatefulActionNode(name, config), s_(s) {}
+
+//     static BT::PortsList providedPorts() {
+//         return { BT::InputPort<geometry_msgs::msg::Pose>("btn_pose") };
+//     }
+
+//     BT::NodeStatus onStart() override {
+//         if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::FAILURE;
+//         return BT::NodeStatus::RUNNING;
+//     }
+
+//     BT::NodeStatus onRunning() override {
+//         if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::RUNNING;
+//         auto robot = s_->get_base_position();
+//         if (!robot) return BT::NodeStatus::RUNNING;
+
+//         // The goal is always re-computed from current robot position
+//         auto final_standoff = feasible_standoff_utils::compute_circular_target(
+//             target_button_.position.x, target_button_.position.y,
+//             robot->x, robot->y, 1.25);
+
+//         int8_t cost_at_goal = 0;
+//         if (feasible_standoff_utils::costAtWorld(s_->get_latest_costmap(), 
+//                 final_standoff.position.x, final_standoff.position.y, cost_at_goal)) {
+//             RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 500,
+//                 "[DBG] frame=%s standoff=(%.2f,%.2f) cost=%d",
+//                 s_->get_latest_costmap().header.frame_id.c_str(),
+//                 final_standoff.position.x, final_standoff.position.y, cost_at_goal);
+//         } else {
+//             RCLCPP_WARN_THROTTLE(s_->get_logger(), *s_->get_clock(), 500,
+//                 "[DBG] standoff (%.2f,%.2f) OUTSIDE COSTMAP — frame=%s",
+//                 final_standoff.position.x, final_standoff.position.y,
+//                 s_->get_latest_costmap().header.frame_id.c_str());
+//         }
+
+//         // Single call — returns goal directly if clear, or a boundary exit point if blocked
+//         auto next_wp = feasible_standoff_utils::compute_next_waypoint(
+//             robot->x, robot->y, final_standoff, s_->get_latest_costmap());
+
+//         s_->publish_mission_goal(next_wp, false, 0.0, 0.0, false, 0.1);
+
+//         // Visualization
+//         visualization_msgs::msg::MarkerArray debug_markers;
+
+        
+
+//         // Ray: robot -> next_wp (green if going direct, blue if via boundary)
+//         bool is_avoiding = (std::hypot(next_wp.position.x - final_standoff.position.x,
+//                                        next_wp.position.y - final_standoff.position.y) > 0.1);
+
+//         visualization_msgs::msg::Marker ray;
+//         ray.header.frame_id = "odom";
+//         ray.header.stamp = s_->now();
+//         ray.ns = "approach"; ray.id = 0;
+//         ray.type = visualization_msgs::msg::Marker::LINE_STRIP;
+//         ray.scale.x = 0.03;
+//         ray.color.a = 1.0;
+//         ray.color.r = is_avoiding ? 1.0 : 0.0;
+//         ray.color.g = is_avoiding ? 0.0 : 1.0;
+//         geometry_msgs::msg::Point p1, p2;
+//         p1.x = robot->x;          p1.y = robot->y;          p1.z = 0.05;
+//         p2.x = next_wp.position.x; p2.y = next_wp.position.y; p2.z = 0.05;
+//         ray.points.push_back(p1);
+//         ray.points.push_back(p2);
+//         debug_markers.markers.push_back(ray);
+
+//         // Sphere at next_wp if avoiding
+//         if (is_avoiding) {
+//             visualization_msgs::msg::Marker sphere;
+//             sphere.header.frame_id = "odom";
+//             sphere.header.stamp = s_->now();
+//             sphere.ns = "approach"; sphere.id = 1;
+//             sphere.type = visualization_msgs::msg::Marker::SPHERE;
+//             sphere.pose = next_wp;
+//             sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.2;
+//             sphere.color.a = 1.0; sphere.color.b = 1.0;
+//             debug_markers.markers.push_back(sphere);
+//         }
+//         s_->marker_array_pub2_->publish(debug_markers);
+
+//         // Debug: sample the costmap along the ray to the standoff
+//         auto costmap = s_->get_latest_costmap();
+//         RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 500,
+//             "Costmap: origin=(%.2f, %.2f) res=%.3f size=%ux%u",
+//             costmap.info.origin.position.x,
+//             costmap.info.origin.position.y,
+//             costmap.info.resolution,
+//             costmap.info.width,
+//             costmap.info.height);
+
+//         // Done when we reach the final standoff, not just the current waypoint
+//         if (s_->base_close_xyw(*robot, final_standoff, 0.10, 0.20)) {
+//             RCLCPP_INFO(s_->get_logger(), "BT: Approach complete.");
+//             return BT::NodeStatus::SUCCESS;
+//         }
+
+//         return BT::NodeStatus::RUNNING;
+//     }
+
+//     void onHalted() override {}
+
+// private:
+//     MissionSequencer* s_;
+//     geometry_msgs::msg::Pose target_button_;
+// };
+
+
+
 class ApproachButton : public BT::StatefulActionNode {
 public:
     ApproachButton(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
@@ -142,6 +255,7 @@ public:
 
     BT::NodeStatus onStart() override {
         if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::FAILURE;
+        start_dist_ = -1.0;
         return BT::NodeStatus::RUNNING;
     }
 
@@ -150,81 +264,93 @@ public:
         auto robot = s_->get_base_position();
         if (!robot) return BT::NodeStatus::RUNNING;
 
-        // The goal is always re-computed from current robot position
+        // 1. Compute the ultimate goal
         auto final_standoff = feasible_standoff_utils::compute_circular_target(
             target_button_.position.x, target_button_.position.y,
             robot->x, robot->y, 1.25);
 
-        int8_t cost_at_goal = 0;
-        if (feasible_standoff_utils::costAtWorld(s_->get_latest_costmap(), 
-                final_standoff.position.x, final_standoff.position.y, cost_at_goal)) {
-            RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 500,
-                "[DBG] frame=%s standoff=(%.2f,%.2f) cost=%d",
-                s_->get_latest_costmap().header.frame_id.c_str(),
-                final_standoff.position.x, final_standoff.position.y, cost_at_goal);
-        } else {
-            RCLCPP_WARN_THROTTLE(s_->get_logger(), *s_->get_clock(), 500,
-                "[DBG] standoff (%.2f,%.2f) OUTSIDE COSTMAP — frame=%s",
-                final_standoff.position.x, final_standoff.position.y,
-                s_->get_latest_costmap().header.frame_id.c_str());
-        }
-
-        // Single call — returns goal directly if clear, or a boundary exit point if blocked
+        // 2. Get obstacle-aware waypoint (may be a boundary exit point or final_standoff itself)
         auto next_wp = feasible_standoff_utils::compute_next_waypoint(
             robot->x, robot->y, final_standoff, s_->get_latest_costmap());
 
-        s_->publish_mission_goal(next_wp, false, 0.0, 0.0, false, 0.1);
+        // 3. Blend smoothly back to final_standoff as path clears
+        double deviation = std::hypot(
+            next_wp.position.x - final_standoff.position.x,
+            next_wp.position.y - final_standoff.position.y);
+        const double blend_threshold = 0.5;
+        double alpha = std::clamp(1.0 - (deviation / blend_threshold), 0.0, 1.0);
+
+        geometry_msgs::msg::Pose avoidance_target;
+        avoidance_target.position.x = next_wp.position.x + alpha * (final_standoff.position.x - next_wp.position.x);
+        avoidance_target.position.y = next_wp.position.y + alpha * (final_standoff.position.y - next_wp.position.y);
+        avoidance_target.position.z = 0.0;
+        feasible_standoff_utils::set_pose_yaw(avoidance_target,
+            std::atan2(final_standoff.position.y - avoidance_target.position.y,
+                       final_standoff.position.x - avoidance_target.position.x));
+
+        // 4. Trapezoidal interpolation — same as your original, but toward avoidance_target
+        double dist_to_target = std::hypot(
+            avoidance_target.position.x - robot->x,
+            avoidance_target.position.y - robot->y);
+
+        if (start_dist_ < 0) {
+            start_dist_ = dist_to_target;
+            start_pose_ = robot->pose;
+        }
+
+        double progress = 1.0 - (dist_to_target / start_dist_);
+        double target_yaw;
+        if (deviation > 0.1) {
+            // Face the direction of the bypass/avoidance target
+            target_yaw = std::atan2(avoidance_target.position.y - robot->y, 
+                                    avoidance_target.position.x - robot->x);
+        } else {
+            // We are on the final stretch, face the button (target_button_ is the actual button)
+            target_yaw = std::atan2(target_button_.position.y - robot->y, 
+                                    target_button_.position.x - robot->x);
+        }
+        feasible_standoff_utils::set_pose_yaw(avoidance_target, target_yaw);
+
+        // 4. Execution
+        // Use the 'heading' variable you already calculated for the publish_mission_goal
+        double heading = target_yaw;
+
+        if (progress < 0.25) {
+            auto wp = s_->interpolate_pose(start_pose_, avoidance_target, 0.33);
+            s_->publish_mission_goal(wp, false, 0.1, heading, false, 0.1);
+        } else if (progress < 0.74) {
+            auto wp = s_->interpolate_pose(start_pose_, avoidance_target, 0.80);
+            s_->publish_mission_goal(wp, false, 0.1, heading, false, 0.1);
+        } else {
+            s_->publish_mission_goal(avoidance_target, false, 0.0, heading, false, 0.1);
+        }
+
+        // 5. Reset interpolation when avoidance_target shifts significantly
+        // (obstacle cleared, target jumps back toward final_standoff)
+        if (std::hypot(avoidance_target.position.x - last_target_.position.x,
+                       avoidance_target.position.y - last_target_.position.y) > 0.3) {
+            start_dist_ = -1.0;
+            start_pose_ = robot->pose;
+        }
+        last_target_ = avoidance_target;
 
         // Visualization
+        bool is_avoiding = deviation > 0.1;
         visualization_msgs::msg::MarkerArray debug_markers;
-
-        
-
-        // Ray: robot -> next_wp (green if going direct, blue if via boundary)
-        bool is_avoiding = (std::hypot(next_wp.position.x - final_standoff.position.x,
-                                       next_wp.position.y - final_standoff.position.y) > 0.1);
-
         visualization_msgs::msg::Marker ray;
-        ray.header.frame_id = "odom";
-        ray.header.stamp = s_->now();
+        ray.header.frame_id = "odom"; ray.header.stamp = s_->now();
         ray.ns = "approach"; ray.id = 0;
         ray.type = visualization_msgs::msg::Marker::LINE_STRIP;
-        ray.scale.x = 0.03;
-        ray.color.a = 1.0;
+        ray.scale.x = 0.03; ray.color.a = 1.0;
         ray.color.r = is_avoiding ? 1.0 : 0.0;
         ray.color.g = is_avoiding ? 0.0 : 1.0;
         geometry_msgs::msg::Point p1, p2;
-        p1.x = robot->x;          p1.y = robot->y;          p1.z = 0.05;
-        p2.x = next_wp.position.x; p2.y = next_wp.position.y; p2.z = 0.05;
-        ray.points.push_back(p1);
-        ray.points.push_back(p2);
+        p1.x = robot->x; p1.y = robot->y; p1.z = 0.05;
+        p2.x = avoidance_target.position.x; p2.y = avoidance_target.position.y; p2.z = 0.05;
+        ray.points.push_back(p1); ray.points.push_back(p2);
         debug_markers.markers.push_back(ray);
-
-        // Sphere at next_wp if avoiding
-        if (is_avoiding) {
-            visualization_msgs::msg::Marker sphere;
-            sphere.header.frame_id = "odom";
-            sphere.header.stamp = s_->now();
-            sphere.ns = "approach"; sphere.id = 1;
-            sphere.type = visualization_msgs::msg::Marker::SPHERE;
-            sphere.pose = next_wp;
-            sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.2;
-            sphere.color.a = 1.0; sphere.color.b = 1.0;
-            debug_markers.markers.push_back(sphere);
-        }
         s_->marker_array_pub2_->publish(debug_markers);
 
-        // Debug: sample the costmap along the ray to the standoff
-        auto costmap = s_->get_latest_costmap();
-        RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 500,
-            "Costmap: origin=(%.2f, %.2f) res=%.3f size=%ux%u",
-            costmap.info.origin.position.x,
-            costmap.info.origin.position.y,
-            costmap.info.resolution,
-            costmap.info.width,
-            costmap.info.height);
-
-        // Done when we reach the final standoff, not just the current waypoint
         if (s_->base_close_xyw(*robot, final_standoff, 0.10, 0.20)) {
             RCLCPP_INFO(s_->get_logger(), "BT: Approach complete.");
             return BT::NodeStatus::SUCCESS;
@@ -238,6 +364,9 @@ public:
 private:
     MissionSequencer* s_;
     geometry_msgs::msg::Pose target_button_;
+    geometry_msgs::msg::Pose start_pose_;
+    geometry_msgs::msg::Pose last_target_;
+    double start_dist_ = -1.0;
 };
 
 class PrePress : public BT::StatefulActionNode {
@@ -607,6 +736,58 @@ public:
         return BT::NodeStatus::SUCCESS;
     }
 
+private:
+    MissionSequencer* s_;
+};
+
+class IsDoorOpen : public BT::ConditionNode {
+public:
+    IsDoorOpen(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+        : BT::ConditionNode(name, config), s_(s) {}
+
+    static BT::PortsList providedPorts() {
+        return { BT::InputPort<DoorInfo>("door_info") };
+    }
+
+    BT::NodeStatus tick() override {
+        DoorInfo door;
+        if (!getInput("door_info", door)) return BT::NodeStatus::FAILURE;
+        if (!s_->have_costmap()) return BT::NodeStatus::FAILURE;
+        auto robot = s_->get_base_position();
+
+        bool open = feasible_standoff_utils::is_door_open(
+            door.pillar1.position.x, door.pillar1.position.y,
+            door.pillar2.position.x, door.pillar2.position.y,
+            s_->get_latest_costmap());
+
+        double dist = std::hypot(robot->x - door.center.position.x, 
+                             robot->y - door.center.position.y);
+
+        // If we are more than 4 meters away, we can't trust the costmap
+        if (dist > 2.0) {
+            RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 2000, 
+                "Too far to verify door (%.2fm). Assuming CLOSED.", dist);
+            return BT::NodeStatus::FAILURE; 
+        }
+
+
+        if (open) {
+            RCLCPP_INFO(s_->get_logger(), 
+                "\033[1;32m[PERCEPTION]\033[0m Door detected as OPEN between pillars: P1(%.2f, %.2f) P2(%.2f, %.2f)", 
+                door.pillar1.position.x, door.pillar1.position.y,
+                door.pillar2.position.x, door.pillar2.position.y);
+                            RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 2000, 
+                "Too far to verify door (%.2fm). Assuming CLOSED.", dist);
+        } else {
+            // Throttled so it doesn't spam the terminal while waiting
+            RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 2000, 
+                "\033[1;31m[PERCEPTION]\033[0m Door CLOSED at (%.2f, %.2f). Running press sequence...", 
+                door.center.position.x, door.center.position.y);
+        }
+        
+
+        return open ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+    }
 private:
     MissionSequencer* s_;
 };
@@ -1081,6 +1262,72 @@ int main(int argc, char ** argv)
             return std::make_unique<IsPathClear>(name, config, sequencer_node.get());
         });
 
+    factory.registerBuilder<IsDoorOpen>("IsDoorOpen", 
+        [sequencer_node](const std::string& name, const BT::NodeConfig& config) {
+            return std::make_unique<IsDoorOpen>(name, config, sequencer_node.get());
+        });
+
+    // std::string xml_text = R"(
+    // <root BTCPP_format="4">
+    //     <BehaviorTree ID="MainTree">
+    //         <Sequence name="root_sequence">
+    //             <RetryUntilSuccessful num_attempts="-1">
+    //                 <Sequence>
+    //                     <Sleep msec="100"/>
+    //                     <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
+    //                 </Sequence>
+    //             </RetryUntilSuccessful>
+
+    //             <ReactiveSequence name="adaptive_approach">
+    //                 <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
+    //                 <ApproachButton btn_pose="{target_loc}"/>
+    //             </ReactiveSequence>
+    //             <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
+
+    //             <Fallback name="action_selector">
+                    
+    //                 <Sequence name="grasp_branch">
+    //                     <Precondition if="target_type == 'coke_can'" else="FAILURE">
+    //                         <Sequence>
+    //                             <GraspAndRetract btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.04"/>
+    //                             <Script code=" is_carrying := true; target_gripper := -0.1 "/>
+    //                         </Sequence>
+    //                     </Precondition>
+    //                 </Sequence>
+
+    //                 <Sequence name="door_full_sequence">
+    //                     <Fallback name="press_selector">
+    //                         <Sequence name="push_branch">
+    //                             <Script code=" is_push := (target_type == 'push_button') "/>
+    //                             <Precondition if="is_push" else="FAILURE">
+    //                                 <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.085"/>
+    //                             </Precondition>
+    //                         </Sequence>
+    //                         <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.12"/>
+    //                     </Fallback>
+                        
+    //                     <Sequence name="universal_exit_logic">
+    //                         <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
+    //                         <RetryUntilSuccessful num_attempts="-1">
+    //                             <Fallback name="exit_or_wait">
+    //                                 <ReactiveSequence name="guarded_exit">
+    //                                     <IsPathClear />
+    //                                     <ExitDoor door_info="{door_data}"/>
+    //                                 </ReactiveSequence>
+    //                                 <ForceFailure>
+    //                                     <Sequence name="safety_standby">
+    //                                         <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
+    //                                         <Sleep msec="500"/>
+    //                                     </Sequence>
+    //                                 </ForceFailure>
+    //                             </Fallback>
+    //                         </RetryUntilSuccessful>
+    //                     </Sequence>
+    //                 </Sequence> </Fallback>
+    //         </Sequence>
+    //     </BehaviorTree>
+    // </root>
+    // )";
     std::string xml_text = R"(
     <root BTCPP_format="4">
         <BehaviorTree ID="MainTree">
@@ -1096,13 +1343,13 @@ int main(int argc, char ** argv)
                     <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
                     <ApproachButton btn_pose="{target_loc}"/>
                 </ReactiveSequence>
-                <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
 
                 <Fallback name="action_selector">
                     
                     <Sequence name="grasp_branch">
                         <Precondition if="target_type == 'coke_can'" else="FAILURE">
                             <Sequence>
+                                <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
                                 <GraspAndRetract btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.04"/>
                                 <Script code=" is_carrying := true; target_gripper := -0.1 "/>
                             </Sequence>
@@ -1110,34 +1357,40 @@ int main(int argc, char ** argv)
                     </Sequence>
 
                     <Sequence name="door_full_sequence">
-                        <Fallback name="press_selector">
-                            <Sequence name="push_branch">
-                                <Script code=" is_push := (target_type == 'push_button') "/>
-                                <Precondition if="is_push" else="FAILURE">
-                                    <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.085"/>
-                                </Precondition>
+                        <Fallback name="door_decision_gate">
+                            <IsDoorOpen door_info="{door_data}"/>
+
+                            <Sequence name="press_button_flow">
+                                <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
+                                <Fallback name="press_selector">
+                                    <Sequence name="push_branch">
+                                        <Script code=" is_push := (target_type == 'push_button') "/>
+                                        <Precondition if="is_push" else="FAILURE">
+                                            <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.085"/>
+                                        </Precondition>
+                                    </Sequence>
+                                    <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.12"/>
+                                </Fallback>
+                                <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
                             </Sequence>
-                            <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.12"/>
                         </Fallback>
                         
-                        <Sequence name="universal_exit_logic">
-                            <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
-                            <RetryUntilSuccessful num_attempts="-1">
-                                <Fallback name="exit_or_wait">
-                                    <ReactiveSequence name="guarded_exit">
-                                        <IsPathClear />
-                                        <ExitDoor door_info="{door_data}"/>
-                                    </ReactiveSequence>
-                                    <ForceFailure>
-                                        <Sequence name="safety_standby">
-                                            <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
-                                            <Sleep msec="500"/>
-                                        </Sequence>
-                                    </ForceFailure>
-                                </Fallback>
-                            </RetryUntilSuccessful>
-                        </Sequence>
-                    </Sequence> </Fallback>
+                        <RetryUntilSuccessful num_attempts="-1">
+                            <Fallback name="exit_or_wait">
+                                <ReactiveSequence name="guarded_exit">
+                                    <IsPathClear />
+                                    <ExitDoor door_info="{door_data}"/>
+                                </ReactiveSequence>
+                                <ForceFailure>
+                                    <Sequence name="safety_standby">
+                                        <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
+                                        <Sleep msec="500"/>
+                                    </Sequence>
+                                </ForceFailure>
+                            </Fallback>
+                        </RetryUntilSuccessful>
+                    </Sequence> 
+                </Fallback>
             </Sequence>
         </BehaviorTree>
     </root>

@@ -279,4 +279,36 @@ namespace feasible_standoff_utils
 
         return goal;  // fallback
     }
+
+    bool is_door_open(const double x1, const double y1, const double x2, const double y2,
+                        const nav_msgs::msg::OccupancyGrid& costmap) {
+
+
+        double dist = std::hypot(x2 - x1, y2 - y1);
+        if (dist < 0.1) return false; // Sanity check for bad pillar data
+
+        int8_t max_seen_cost = 0;
+        int samples = 0;
+
+        // Scan the center "valley" of the door (30% to 70% of the width)
+        // This avoids the 'funky' cost dispersal near the actual pillars
+        for (double d = 0.3 * dist; d < 0.7 * dist; d += 0.05) {
+            double tx = x1 + (x2 - x1) * (d / dist);
+            double ty = y1 + (y2 - y1) * (d / dist);
+
+            int8_t cost;
+            if (costAtWorld(costmap, tx, ty, cost)) {
+                if (cost > max_seen_cost) max_seen_cost = cost;
+                samples++;
+            }
+        }
+
+        
+        if (samples == 0) return false;
+        if (max_seen_cost == -1) return false;
+
+        // If the 'worst' point in the gap is low cost, the door is open.
+        // Threshold 35 allows for some 'bleeding' from the walls.
+        return (max_seen_cost < 100);
+    }
 } // namespace standoff_utils

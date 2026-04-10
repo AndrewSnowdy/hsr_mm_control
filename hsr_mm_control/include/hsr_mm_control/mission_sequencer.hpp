@@ -94,12 +94,9 @@ public:
     bool is_door_path_blocked();
 
 private:
-    // --- Core FSM ---
-    void simple_timer();
 
     // --- Mission Goal Helper ---
     rclcpp::Publisher<hsr_mm_control::msg::MissionGoal>::SharedPtr mission_pub_;
-
     visualization_msgs::msg::MarkerArray::ConstSharedPtr last_person_marker_;
     std::optional<DoorInfo> current_door_target_;
 

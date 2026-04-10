@@ -52,5 +52,7 @@ namespace feasible_standoff_utils
     double get_pose_yaw(const geometry_msgs::msg::Pose &pose);
     void set_pose_yaw(geometry_msgs::msg::Pose &pose, double yaw);
 
+    bool is_door_open(const double x1, const double y1, const double x2, const double y2,
+                        const nav_msgs::msg::OccupancyGrid& costmap);
 
 } // namespace standoff_utils
