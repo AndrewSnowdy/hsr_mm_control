@@ -89,7 +89,7 @@ class HSRDetailedProfileNode(Node):
         # t_pre_infer = time.perf_counter()
         # half=True is essential for your FP16 engine speed
         # results = self.model.track(cv_image, persist=True, classes=[0], verbose=False, half=True)
-        human_results = self.human_model.predict(cv_image, classes=[0], verbose=False, half=True)
+        human_results = self.human_model.predict(cv_image, classes=[0, 39], verbose=False, half=True)
 
         if self.frame_count % self.button_interval == 0:
             # We save the results to a class variable so they persist
@@ -103,7 +103,7 @@ class HSRDetailedProfileNode(Node):
         detection_array.header = msg.header
 
         # Draw Humans
-        self.process_results(human_results, "person", (0, 255, 0), cv_image, detection_array)
+        self.process_results(human_results, None, (0, 255, 0), cv_image, detection_array)
 
         # Draw Buttons from the last time we found them (No flicker!)
         if self.latest_button is not None:
