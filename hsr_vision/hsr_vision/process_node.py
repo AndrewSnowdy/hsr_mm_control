@@ -36,6 +36,7 @@ class HSRPersonTracker(Node):
             "prox_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (1.0, 0.0, 0.0)}, # Red
             "push_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (0.0, 1.0, 0.0)}, # Green
             "door":        {"thresh": 18,  "dist": 0.5, "timeout": 45.0,  "color": (1.0, 0.5, 0.0)}, # orange
+            "bottle":      {"thresh": 5,  "dist": 0.4, "timeout": 2.0,  "color": (1.0, 1.0, 0.0)}, # Yellow
             "default":     {"thresh": 5,  "dist": 0.5, "timeout": 1.0, "color": (0.5, 0.5, 0.5)}
 }
 
@@ -166,7 +167,7 @@ class HSRPersonTracker(Node):
                 z = self._stable_depth_at(u, v)
                 if z is None: continue
 
-                yaw_offset = -0.1 
+                yaw_offset = -0.13
 
                 # Project to 3D with the calibration offset
                 # We apply the offset to the horizontal (X) component
@@ -444,6 +445,7 @@ class HSRPersonTracker(Node):
         self._add_people_to_array(full_array, now_msg)
         self._add_buttons_to_array(full_array, now_msg)
         self._add_doors_to_array(full_array, now_msg)
+        self._add_bottles_to_array(full_array, now_msg)
 
         # 4. Publish EVERYTHING once
         if len(full_array.markers) > 1: # Only publish if there's more than just the clear marker
@@ -543,6 +545,28 @@ class HSRPersonTracker(Node):
             arrow.scale.x, arrow.scale.y, arrow.scale.z = 0.6, 0.1, 0.1
             arrow.color.r, arrow.color.g, arrow.color.b, arrow.color.a = 1.0, 1.0, 1.0, 1.0
             arr.markers.append(arrow)
+
+    def _add_bottles_to_array(self, arr: MarkerArray, now_msg) -> None:
+        for tid, tr in self.tracks.items():
+            if tr["label"] != "bottle": continue
+            config = self.class_configs.get("bottle")
+            if tr["hits"] < config["thresh"]: continue
+
+            m = Marker()
+            m.header.frame_id, m.header.stamp = self.base_frame, now_msg
+            m.ns, m.id = f"bottle_{tid}", 0
+            m.type, m.action = Marker.CYLINDER, Marker.ADD
+
+            m.pose.position.x, m.pose.position.y, m.pose.position.z = tr["pos"]
+            m.pose.orientation.w = 1.0
+            
+            # Standard bottle size (approx 7cm wide, 20cm tall)
+            m.scale.x = m.scale.y = 0.07
+            m.scale.z = 0.2
+            
+            m.color.r, m.color.g, m.color.b = config["color"]
+            m.color.a = 1.0
+            arr.markers.append(m)
 
 
     def _log_diagnostics(self) -> None:

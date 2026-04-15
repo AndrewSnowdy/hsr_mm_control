@@ -62,8 +62,8 @@ FinalPoseNode::FinalPoseNode()
     });
 
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    "/odom",
-    // "/switched_odom",
+    // "/odom",
+    "/switched_odom",
     // "/omni_base_controller/wheel_odom",
      10, [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
         base_pos_x_ = msg->pose.pose.position.x;

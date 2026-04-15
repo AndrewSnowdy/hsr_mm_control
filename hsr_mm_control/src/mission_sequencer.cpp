@@ -1033,7 +1033,7 @@ std::optional<ButtonInfo> MissionSequencer::get_closest_button() {
         if (m.action == visualization_msgs::msg::Marker::DELETEALL || m.ns.empty()) continue;
         
         // Search for the prefix "button"
-        if (m.ns.find("button") != std::string::npos) {
+        if (m.ns.find("button") != std::string::npos || m.ns.find("bottle") != std::string::npos) {
             double d = std::hypot(m.pose.position.x - robot->x, m.pose.position.y - robot->y);
             
             if (d < best_dist) {
@@ -1047,8 +1047,8 @@ std::optional<ButtonInfo> MissionSequencer::get_closest_button() {
                     info.type = "push_button";
                 } else if (m.ns.find("prox") != std::string::npos) {
                     info.type = "prox_button";
-                } else if (m.ns.find("coke_can") != std::string::npos) {
-                    info.type = "coke_can";
+                } else if (m.ns.find("bottle") != std::string::npos) {
+                    info.type = "bottle";
                 } else {
                     // Option B: Default for the green button in your script
                     info.type = "push_button"; 
@@ -1347,7 +1347,7 @@ int main(int argc, char ** argv)
                 <Fallback name="action_selector">
                     
                     <Sequence name="grasp_branch">
-                        <Precondition if="target_type == 'coke_can'" else="FAILURE">
+                        <Precondition if="target_type == 'bottle'" else="FAILURE">
                             <Sequence>
                                 <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
                                 <GraspAndRetract btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.04"/>
