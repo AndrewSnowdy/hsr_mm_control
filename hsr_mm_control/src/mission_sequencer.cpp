@@ -425,7 +425,7 @@ public:
         s_->set_yaw(target_pose, standoff_yaw_);
 
         // 5. Publish to controller with IK mode = TRUE
-        s_->publish_mission_goal(target_pose, true, 0.0, 0.0, false, gripper);
+        s_->publish_mission_goal(target_pose, true, 0.0, 0.0, true, gripper);
 
         // 6. Check if EE has arrived (2cm tolerance)
         if (s_->ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.04)) {
@@ -446,6 +446,65 @@ private:
 };
 
 
+// class PressButton : public BT::StatefulActionNode {
+// public:
+//     PressButton(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+//         : BT::StatefulActionNode(name, config), s_(s) {}
+
+//     static BT::PortsList providedPorts() {
+//         return { BT::InputPort<geometry_msgs::msg::Pose>("btn_pose"),
+//                  BT::InputPort<double>("locked_yaw"),
+//                  BT::InputPort<double>("depth") }; // New Port
+//     }
+
+//     BT::NodeStatus onStart() override {
+//         if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::FAILURE;
+//         if (!getInput("locked_yaw", standoff_yaw_)) return BT::NodeStatus::FAILURE;
+        
+//         // If depth isn't provided in XML, default to 0.06
+//         if (!getInput("depth", target_depth_)) {
+//             target_depth_ = 0.04;
+//         }
+        
+//         return BT::NodeStatus::RUNNING;
+//     }
+
+//     BT::NodeStatus onRunning() override {
+//         auto ee_pos = s_->get_ee_position();
+//         if (!ee_pos) return BT::NodeStatus::RUNNING;
+
+//         bool flat = s_->force_wrist_flat;
+//         double gripper = s_->target_gripper;
+//         double offset = s_->depth_offset;
+//         double adjusted_depth = target_depth_ + offset;
+
+
+//         // Use the target_depth_ we got from the Blackboard/XML
+//         auto press_pose = feasible_standoff_utils::compute_ee_target(
+//             target_button_.position.x, target_button_.position.y, (target_button_.position.z + 0.04), 
+//             standoff_yaw_, adjusted_depth);
+        
+//         s_->set_yaw(press_pose, standoff_yaw_);
+//         s_->publish_mission_goal(press_pose, true, 0.0, 0.0, true, gripper);
+
+//         // Arrival check
+//         if (s_->ee_close_xyz(*ee_pos, press_pose.position.x, press_pose.position.y, press_pose.position.z, 0.02)) {
+//             RCLCPP_INFO(s_->get_logger(), "BT: Press/Wave at depth %.2fm Complete.", target_depth_);
+//             return BT::NodeStatus::SUCCESS;
+//         }
+
+//         return BT::NodeStatus::RUNNING;
+//     }
+
+//     void onHalted() override {}
+
+// private:
+//     MissionSequencer* s_;
+//     geometry_msgs::msg::Pose target_button_;
+//     double standoff_yaw_;
+//     double target_depth_; // Store the depth here
+// };
+
 class PressButton : public BT::StatefulActionNode {
 public:
     PressButton(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
@@ -454,18 +513,19 @@ public:
     static BT::PortsList providedPorts() {
         return { BT::InputPort<geometry_msgs::msg::Pose>("btn_pose"),
                  BT::InputPort<double>("locked_yaw"),
-                 BT::InputPort<double>("depth") }; // New Port
+                 BT::InputPort<double>("depth") };
     }
 
     BT::NodeStatus onStart() override {
         if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::FAILURE;
         if (!getInput("locked_yaw", standoff_yaw_)) return BT::NodeStatus::FAILURE;
         
-        // If depth isn't provided in XML, default to 0.06
         if (!getInput("depth", target_depth_)) {
-            target_depth_ = 0.06;
+            target_depth_ = 0.04;
         }
-        
+
+        // --- NEW: Reset dwell tracking ---
+        arrival_time_ = std::nullopt; 
         return BT::NodeStatus::RUNNING;
     }
 
@@ -473,24 +533,36 @@ public:
         auto ee_pos = s_->get_ee_position();
         if (!ee_pos) return BT::NodeStatus::RUNNING;
 
-        bool flat = s_->force_wrist_flat;
         double gripper = s_->target_gripper;
         double offset = s_->depth_offset;
         double adjusted_depth = target_depth_ + offset;
 
-
-        // Use the target_depth_ we got from the Blackboard/XML
         auto press_pose = feasible_standoff_utils::compute_ee_target(
-            target_button_.position.x, target_button_.position.y, target_button_.position.z, 
+            target_button_.position.x, target_button_.position.y, (target_button_.position.z + 0.02), 
             standoff_yaw_, adjusted_depth);
         
         s_->set_yaw(press_pose, standoff_yaw_);
-        s_->publish_mission_goal(press_pose, true, 0.0, 0.0, flat, gripper);
+        s_->publish_mission_goal(press_pose, true, 0.0, 0.0, true, gripper);
 
-        // Arrival check
-        if (s_->ee_close_xyz(*ee_pos, press_pose.position.x, press_pose.position.y, press_pose.position.z, 0.02)) {
-            RCLCPP_INFO(s_->get_logger(), "BT: Press/Wave at depth %.2fm Complete.", target_depth_);
-            return BT::NodeStatus::SUCCESS;
+        // 1. Check if we have arrived at the proximity zone
+        bool is_close = s_->ee_close_xyz(*ee_pos, press_pose.position.x, press_pose.position.y, press_pose.position.z, 0.02);
+
+        if (is_close) {
+            // 2. If this is the FIRST time we are close, start the timer
+            if (!arrival_time_.has_value()) {
+                arrival_time_ = s_->now();
+                RCLCPP_INFO(s_->get_logger(), "BT: Arrived at button. Dwelling for sensor activation...");
+            }
+
+            // 3. Check if 2 seconds have passed since arrival
+            auto elapsed = (s_->now() - *arrival_time_).seconds();
+            if (elapsed >= 4.0) {
+                RCLCPP_INFO(s_->get_logger(), "BT: Dwell complete. Success.");
+                return BT::NodeStatus::SUCCESS;
+            }
+        } else {
+            // Optional: If the robot drifts away, reset the timer
+            // arrival_time_ = std::nullopt; 
         }
 
         return BT::NodeStatus::RUNNING;
@@ -502,7 +574,10 @@ private:
     MissionSequencer* s_;
     geometry_msgs::msg::Pose target_button_;
     double standoff_yaw_;
-    double target_depth_; // Store the depth here
+    double target_depth_;
+    
+    // --- NEW: Timer Variable ---
+    std::optional<rclcpp::Time> arrival_time_;
 };
 
 
@@ -609,8 +684,8 @@ public:
         }
 
         // Logic Relay
-        if (p < -0.1) s_->publish_mission_goal(stage1, false, 0.25, door_yaw_);
-        else if (p < 0.6) s_->publish_mission_goal(stage2, false, 0.3, door_yaw_);
+        if (p < -0.1) s_->publish_mission_goal(stage1, false, 0.15, door_yaw_);
+        else if (p < 0.6) s_->publish_mission_goal(stage2, false, 0.2, door_yaw_);
         else s_->publish_mission_goal(final_goal, false, 0.0, door_yaw_);
 
         return BT::NodeStatus::RUNNING;
@@ -1132,7 +1207,7 @@ bool MissionSequencer::is_door_path_blocked() {
     bool blocked = false;
 
     for (const auto & marker : local_msg->markers) {
-        if (marker.ns == "people") {
+        if (marker.ns == "people" || marker.ns.rfind("person_", 0) == 0) {
             // 2. Translate person relative to door center
             double dx_world = marker.pose.position.x - tx;
             double dy_world = marker.pose.position.y - ty;
@@ -1369,7 +1444,7 @@ int main(int argc, char ** argv)
                                             <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.085"/>
                                         </Precondition>
                                     </Sequence>
-                                    <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.12"/>
+                                    <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.04"/>
                                 </Fallback>
                                 <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
                             </Sequence>
