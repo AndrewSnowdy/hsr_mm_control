@@ -20,6 +20,7 @@ class HSRDetailedProfileNode(Node):
         package_share_dir = get_package_share_directory('hsr_vision')
         human_path = os.path.join(package_share_dir, 'models', 'human.engine')
         button_path = os.path.join(package_share_dir, 'models', 'door_button.engine')
+        # button_path = os.path.join(package_share_dir, 'models', 'door_button_test.engine')
         
         self.get_logger().info(f"Loading model from: {human_path}")
         self.human_model = YOLO(human_path, task='detect') 
