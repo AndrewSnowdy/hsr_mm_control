@@ -211,7 +211,7 @@ class HSRDetailedProfileNode(Node):
                 draw_color = CLASS_COLORS.get(actual_label, color)
                 
                 cv2.rectangle(img, (x1, y1), (x2, y2), draw_color, 2)
-                cv2.putText(img, f"{actual_label} {conf:.2f}", (x1, y1 - 10),
+                cv2.putText(img, actual_label, (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw_color, 2)
 
                 det = self.create_detection_msg(actual_label, conf, [x1, y1, x2, y2], det_array.header)
