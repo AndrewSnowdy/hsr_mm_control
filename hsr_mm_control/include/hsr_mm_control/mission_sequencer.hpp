@@ -54,7 +54,7 @@ public:
         double cruise_speed,
         double door_yaw,
         bool force_wrist_flat = false,
-        double gripper_pos = 0.1);
+        double gripper_pos = -0.1);
 
     // --- Math & Checking Helpers ---
     bool base_close_xyw(const RobotState& state, const geometry_msgs::msg::Pose& target, double tol_xy, double tol_w);
@@ -84,7 +84,7 @@ public:
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_array_pub2_;
 
     bool force_wrist_flat = false;
-    double target_gripper = 0.1;
+    double target_gripper = -0.1;
     double depth_offset = 0.0;
     std::string current_mode = "grasp";
 

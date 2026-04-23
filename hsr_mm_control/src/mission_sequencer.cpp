@@ -315,12 +315,12 @@ public:
         // Use the 'heading' variable you already calculated for the publish_mission_goal
         double heading = target_yaw;
 
-        if (progress < 0.25) {
+        if (progress < 0.22) {
             auto wp = s_->interpolate_pose(start_pose_, avoidance_target, 0.33);
-            s_->publish_mission_goal(wp, false, 0.1, heading, false, 0.1);
-        } else if (progress < 0.74) {
+            s_->publish_mission_goal(wp, false, 0.15, heading, false, 0.1);
+        } else if (progress < 0.7) {
             auto wp = s_->interpolate_pose(start_pose_, avoidance_target, 0.80);
-            s_->publish_mission_goal(wp, false, 0.1, heading, false, 0.1);
+            s_->publish_mission_goal(wp, false, 0.15, heading, false, 0.1);
         } else {
             s_->publish_mission_goal(avoidance_target, false, 0.0, heading, false, 0.1);
         }
@@ -538,8 +538,8 @@ public:
         double adjusted_depth = target_depth_ + offset;
 
         auto press_pose = feasible_standoff_utils::compute_ee_target(
-            target_button_.position.x, target_button_.position.y, (target_button_.position.z + 0.02), 
-            standoff_yaw_, adjusted_depth);
+            target_button_.position.x, target_button_.position.y, target_button_.position.z, 
+            standoff_yaw_, 0.09);
         
         s_->set_yaw(press_pose, standoff_yaw_);
         s_->publish_mission_goal(press_pose, true, 0.0, 0.0, true, gripper);
@@ -556,7 +556,7 @@ public:
 
             // 3. Check if 2 seconds have passed since arrival
             auto elapsed = (s_->now() - *arrival_time_).seconds();
-            if (elapsed >= 4.0) {
+            if (elapsed >= 0.0) {
                 RCLCPP_INFO(s_->get_logger(), "BT: Dwell complete. Success.");
                 return BT::NodeStatus::SUCCESS;
             }
@@ -621,7 +621,7 @@ public:
         // 3. Just publish the pre-calculated goal
         s_->publish_mission_goal(target_pose_, false, 0.0, 0.0, s_->force_wrist_flat, s_->target_gripper);
 
-        if (s_->base_close_xyw(*robot, target_pose_, 0.10, 0.15)) {
+        if (s_->base_close_xyw(*robot, target_pose_, 0.125, 0.2)) {
             RCLCPP_INFO(s_->get_logger(), "BT: Retract Complete.");
             return BT::NodeStatus::SUCCESS;
         }
@@ -639,6 +639,97 @@ private:
 };
 
 
+// class ExitDoor : public BT::StatefulActionNode {
+// public:
+//     ExitDoor(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+//         : BT::StatefulActionNode(name, config), s_(s) {}
+
+//     static BT::PortsList providedPorts() {
+//         return { BT::InputPort<DoorInfo>("door_info") }; // Only need door info now
+//     }
+
+//     BT::NodeStatus onStart() override {
+//         if (!getInput("door_info", door_)) return BT::NodeStatus::FAILURE;
+        
+//         // Lock door yaw once
+//         door_yaw_ = feasible_standoff_utils::get_pose_yaw(door_.center);
+//         return BT::NodeStatus::RUNNING;
+//     }
+
+//     BT::NodeStatus onRunning() override {
+//         auto robot = s_->get_base_position();
+//         if (!robot) return BT::NodeStatus::RUNNING;
+
+//         // 1. Calculate Progress (p) using the stable door center
+//         double dx = robot->x - door_.center.position.x;
+//         double dy = robot->y - door_.center.position.y;
+//         double p = dx * std::cos(door_yaw_) + dy * std::sin(door_yaw_);
+
+//         // 2. Define Ghost Poses relative to stable door center
+//         geometry_msgs::msg::Pose stage1 = door_.center; 
+//         stage1.position.x += 0.2 * std::cos(door_yaw_);
+//         stage1.position.y += 0.2 * std::sin(door_yaw_);
+
+//         geometry_msgs::msg::Pose stage2 = door_.center; 
+//         stage2.position.x += 0.8 * std::cos(door_yaw_);
+//         stage2.position.y += 0.8 * std::sin(door_yaw_);
+
+//         geometry_msgs::msg::Pose final_goal = door_.center; 
+//         final_goal.position.x += 1.0 * std::cos(door_yaw_);
+//         final_goal.position.y += 1.0 * std::sin(door_yaw_);
+
+//         // if (s_->base_close_xyw(*robot, final_goal, 0.15, 0.20)) {
+//         //     RCLCPP_INFO(s_->get_logger(), "BT: Exit Complete.");
+//         //     return BT::NodeStatus::SUCCESS;
+//         // }
+
+//         double dist_to_final = std::hypot(
+//             final_goal.position.x - robot->x,
+//             final_goal.position.y - robot->y);
+
+//         // ---- ADD THIS ----
+//         RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 200,
+//             "[ExitDoor] p=%.3f | robot=(%.2f,%.2f) | center=(%.2f,%.2f) | yaw=%.2f | dist_to_final=%.3f",
+//             p, robot->x, robot->y, 
+//             door_.center.position.x, door_.center.position.y,
+//             door_yaw_, dist_to_final);
+//         // ------------------
+
+//         if (s_->base_close_xyw(*robot, final_goal, 0.15, 0.20)) {
+//             RCLCPP_INFO(s_->get_logger(), "BT: Exit Complete.");
+//             return BT::NodeStatus::SUCCESS;
+//         }
+
+//         if (p < -0.1) {
+//             RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 500,
+//                 "[ExitDoor] STAGE 1 → target=(%.2f,%.2f) speed=0.25",
+//                 stage1.position.x, stage1.position.y);
+//             s_->publish_mission_goal(stage1, false, 0.35, door_yaw_);
+//         } else if (p < 0.6) {
+//             RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 500,
+//                 "[ExitDoor] STAGE 2 → target=(%.2f,%.2f) speed=0.25",
+//                 stage2.position.x, stage2.position.y);
+//             s_->publish_mission_goal(stage2, false, 0.35, door_yaw_);
+//         } else {
+//             RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 500,
+//                 "[ExitDoor] STAGE 3 → target=(%.2f,%.2f) speed=0.20",
+//                 final_goal.position.x, final_goal.position.y);
+//             s_->publish_mission_goal(final_goal, false, 0.20, door_yaw_);
+//         }
+
+
+//         return BT::NodeStatus::RUNNING;
+//     }
+
+//     void onHalted() override {}
+
+// private:
+//     MissionSequencer* s_;
+//     DoorInfo door_;
+//     double door_yaw_;
+// };
+
+
 class ExitDoor : public BT::StatefulActionNode {
 public:
     ExitDoor(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
@@ -648,11 +739,17 @@ public:
         return { BT::InputPort<DoorInfo>("door_info") }; // Only need door info now
     }
 
+
     BT::NodeStatus onStart() override {
         if (!getInput("door_info", door_)) return BT::NodeStatus::FAILURE;
-        
-        // Lock door yaw once
         door_yaw_ = feasible_standoff_utils::get_pose_yaw(door_.center);
+        
+        final_goal_ = door_.center;
+        final_goal_.position.x += 1.4 * std::cos(door_yaw_);
+        final_goal_.position.y += 1.4 * std::sin(door_yaw_);
+        
+        start_dist_ = -1.0;
+        passed_center_ = false;  // reset latch
         return BT::NodeStatus::RUNNING;
     }
 
@@ -660,44 +757,55 @@ public:
         auto robot = s_->get_base_position();
         if (!robot) return BT::NodeStatus::RUNNING;
 
-        // 1. Calculate Progress (p) using the stable door center
-        double dx = robot->x - door_.center.position.x;
-        double dy = robot->y - door_.center.position.y;
-        double p = dx * std::cos(door_yaw_) + dy * std::sin(door_yaw_);
+        double dist_to_final = std::hypot(
+            final_goal_.position.x - robot->x,
+            final_goal_.position.y - robot->y);
+        double dist_to_center = std::hypot(
+            door_.center.position.x - robot->x,
+            door_.center.position.y - robot->y);
 
-        // 2. Define Ghost Poses relative to stable door center
-        geometry_msgs::msg::Pose stage1 = door_.center; 
-        stage1.position.x += 0.2 * std::cos(door_yaw_);
-        stage1.position.y += 0.2 * std::sin(door_yaw_);
+        if (start_dist_ < 0) {
+            start_dist_ = dist_to_final;
+            start_pose_ = robot->pose;
+        }
 
-        geometry_msgs::msg::Pose stage2 = door_.center; 
-        stage2.position.x += 0.8 * std::cos(door_yaw_);
-        stage2.position.y += 0.8 * std::sin(door_yaw_);
+        // Latch: once within 0.3m of center, we've passed through
+        if (dist_to_center < 0.3) passed_center_ = true;
 
-        geometry_msgs::msg::Pose final_goal = door_.center; 
-        final_goal.position.x += 1.5 * std::cos(door_yaw_);
-        final_goal.position.y += 1.5 * std::sin(door_yaw_);
+        double progress = 1.0 - (dist_to_final / start_dist_);
 
-        if (s_->base_close_xyw(*robot, final_goal, 0.15, 0.20)) {
+        if (!passed_center_) {
+            auto wp = s_->interpolate_pose(start_pose_, door_.center, 0.80);
+            s_->publish_mission_goal(wp, false, 0.35, door_yaw_);
+        } else if (progress < 0.50) {
+            auto wp = s_->interpolate_pose(door_.center, final_goal_, 0.65);
+            s_->publish_mission_goal(wp, false, 0.35, door_yaw_);
+        } else {
+            s_->publish_mission_goal(final_goal_, false, 0.20, door_yaw_);
+        }
+
+        if (s_->base_close_xyw(*robot, final_goal_, 0.15, 0.25)) {
             RCLCPP_INFO(s_->get_logger(), "BT: Exit Complete.");
             return BT::NodeStatus::SUCCESS;
         }
 
-        // Logic Relay
-        if (p < -0.1) s_->publish_mission_goal(stage1, false, 0.15, door_yaw_);
-        else if (p < 0.6) s_->publish_mission_goal(stage2, false, 0.2, door_yaw_);
-        else s_->publish_mission_goal(final_goal, false, 0.0, door_yaw_);
-
         return BT::NodeStatus::RUNNING;
     }
-
     void onHalted() override {}
 
 private:
     MissionSequencer* s_;
     DoorInfo door_;
     double door_yaw_;
+    geometry_msgs::msg::Pose final_goal_;
+    geometry_msgs::msg::Pose start_pose_;
+    bool passed_center_ = false;
+    double start_dist_ = -1.0;
 };
+
+
+
+
 
 class GraspAndRetract : public BT::StatefulActionNode {
 public:
@@ -839,7 +947,7 @@ public:
                              robot->y - door.center.position.y);
 
         // If we are more than 4 meters away, we can't trust the costmap
-        if (dist > 2.0) {
+        if (dist > 1.0) {
             RCLCPP_INFO_THROTTLE(s_->get_logger(), *s_->get_clock(), 2000, 
                 "Too far to verify door (%.2fm). Assuming CLOSED.", dist);
             return BT::NodeStatus::FAILURE; 
@@ -1444,7 +1552,7 @@ int main(int argc, char ** argv)
                                             <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.085"/>
                                         </Precondition>
                                     </Sequence>
-                                    <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.04"/>
+                                    <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.4"/>
                                 </Fallback>
                                 <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
                             </Sequence>

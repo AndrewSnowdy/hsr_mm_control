@@ -34,7 +34,7 @@ double QuinticSpline::get_pos(double t) const {
 }
 
 double QuinticSpline::get_vel(double t) const {
-    if (t <= 0 || t >= T_) return 0.0;
+    // if (t <= 0 || t >= T_) return 0.0;
     return a_[1] + 2*a_[2]*t + 3*a_[3]*pow(t,2) + 4*a_[4]*pow(t,3) + 5*a_[5]*pow(t,4);
 }
 
@@ -142,11 +142,17 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     bool is_vel_changing = (vel_change >= 0.05);
     bool is_gripper_moving = (gripper_drift >= 0.01);
 
+    double tracking_error = std::hypot(
+        goal_pos["base_x"] - current_base_x_,
+        goal_pos["base_y"] - current_base_y_);
+
+    bool is_lagging = (tracking_error > 0.05 && is_executing_);
+
     if (!is_base_moving && !is_vel_changing && !is_gripper_moving) {
         // This will print once every 2 seconds
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, 
-            "Goal Ignored (No change): BaseDrift=%.3f, VelChange=%.3f, GripDrift=%.3f", 
-            goal_drift, vel_change, gripper_drift);
+            "Goal Ignored (No change): BaseDrift=%.3f, VelChange=%.3f, GripDrift=%.3f, TrackingError=%.3f", 
+            goal_drift, vel_change, gripper_drift, tracking_error);
         return;
     }
 
@@ -160,7 +166,7 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     // We use the max of current speed or target speed to ensure we don't stall.
     double v_start = std::hypot(current_vx_, current_vy_);
     double v_avg = (v_start + target_v_mag) / 2.0;
-    v_avg = std::clamp(v_avg, 0.1, 0.25); // Minimum 0.1m/s to avoid infinite time
+    v_avg = std::clamp(v_avg, 0.2, 0.55); // Minimum 0.1m/s to avoid infinite time
 
     // Golden Rule: Time = Distance / Speed
     double T_kinematic = L / v_avg;
@@ -172,7 +178,7 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     }
     
     // Final T: At least 1.5s for stability, but matches physics for the sprint
-    double T_dynamic = std::max({T_kinematic, max_arm_delta / 0.2, 1.5}); 
+    double T_dynamic = std::max({T_kinematic, max_arm_delta / 0.4, 1.0}); 
     
 
     double raw_goal_yaw = goal_pos["base_yaw"];
@@ -222,12 +228,30 @@ void JointTrajectoryController::timer_callback() {
 
     current_time_s_ += dt;
 
-    // Check for completion based on time
+    // // Check for completion based on time
+    // if (current_time_s_ >= total_expected_time_) {
+    //     is_executing_ = false;
+    //     base_pub_->publish(geometry_msgs::msg::Twist());
+    //     return;
+    // }
+
     if (current_time_s_ >= total_expected_time_) {
+    double residual_err = std::hypot(
+        splines_["base_x"].get_pos(total_expected_time_) - current_base_x_,
+        splines_["base_y"].get_pos(total_expected_time_) - current_base_y_);
+
+    if (residual_err < 0.03) {
+        // Actually arrived — safe to stop
         is_executing_ = false;
         base_pub_->publish(geometry_msgs::msg::Twist());
         return;
+    } else {
+        // Robot is lagging — extend the spline time rather than stopping cold
+        // Just clamp t to T so spline keeps returning the final velocity
+        current_time_s_ = total_expected_time_;
+        // Fall through and keep publishing
     }
+}
 
     // --- SET TARGETS DIRECTLY FROM SPLINE ---
     // target_vx and target_vy are now in m/s directly
@@ -261,37 +285,37 @@ void JointTrajectoryController::timer_callback() {
     // double pos_error = std::hypot(err_x, err_y);
 
     // --- PRINT DEBUG EVERY 10 TICKS (100ms) ---
-    // static int print_count = 0;
-    // if (print_count++ >= 10) {
-    //     print_count = 0;
-    //     // Calculate current World-Frame Velocity Error (for Kd analysis)
-    //         double v_err_x_world = target_vx - current_vx_world_;
-    //         double v_err_y_world = target_vy - current_vy_world_;
-    //         double cy = std::cos(current_yaw_);
-    //         double sy = std::sin(current_yaw_);
+    static int print_count = 0;
+    if (print_count++ >= 10) {
+        print_count = 0;
+        // Calculate current World-Frame Velocity Error (for Kd analysis)
+            double v_err_x_world = target_vx - current_vx_world_;
+            double v_err_y_world = target_vy - current_vy_world_;
+            double cy = std::cos(current_yaw_);
+            double sy = std::sin(current_yaw_);
 
-    //         RCLCPP_INFO(get_logger(), "=== [DEBUG] TIME: %.2f / %.2f ===", current_time_s_, total_expected_time_);
+            RCLCPP_INFO(get_logger(), "=== [DEBUG] TIME: %.2f / %.2f ===", current_time_s_, total_expected_time_);
             
-    //         RCLCPP_INFO(get_logger(), "1. WORLD POS (Goal vs Current)");
-    //         RCLCPP_INFO(get_logger(), "   Tgt: [%.3f, %.3f] | Cur: [%.3f, %.3f]", target_x, target_y, current_base_x_, current_base_y_);
-    //         RCLCPP_INFO(get_logger(), "   Pos Err: X=%.3f, Y=%.3f", err_x, err_y);
+            RCLCPP_INFO(get_logger(), "1. WORLD POS (Goal vs Current)");
+            RCLCPP_INFO(get_logger(), "   Tgt: [%.3f, %.3f] | Cur: [%.3f, %.3f]", target_x, target_y, current_base_x_, current_base_y_);
+            RCLCPP_INFO(get_logger(), "   Pos Err: X=%.3f, Y=%.3f", err_x, err_y);
 
-    //         RCLCPP_INFO(get_logger(), "2. WORLD VEL (Feedforward vs Actual)");
-    //         RCLCPP_INFO(get_logger(), "   Tgt: [%.3f, %.3f] | Cur: [%.3f, %.3f]", target_vx, target_vy, current_vx_world_, current_vy_world_);
-    //         RCLCPP_INFO(get_logger(), "   Vel Err: X=%.3f, Y=%.3f", v_err_x_world, v_err_y_world);
+            RCLCPP_INFO(get_logger(), "2. WORLD VEL (Feedforward vs Actual)");
+            RCLCPP_INFO(get_logger(), "   Tgt: [%.3f, %.3f] | Cur: [%.3f, %.3f]", target_vx, target_vy, current_vx_world_, current_vy_world_);
+            RCLCPP_INFO(get_logger(), "   Vel Err: X=%.3f, Y=%.3f", v_err_x_world, v_err_y_world);
 
-    //         RCLCPP_INFO(get_logger(), "3. ROTATION & COMMAND (Base Frame)");
-    //         RCLCPP_INFO(get_logger(), "   Yaw: %.3f rad | C: %.3f, S: %.3f", current_yaw_, cy, sy);
-    //         // RCLCPP_INFO(get_logger(), "   CMD: VX=%.3f, VY=%.3f, VW=%.3f", twist.linear.x, twist.linear.y, twist.angular.z);
+            RCLCPP_INFO(get_logger(), "3. ROTATION & COMMAND (Base Frame)");
+            RCLCPP_INFO(get_logger(), "   Yaw: %.3f rad | C: %.3f, S: %.3f", current_yaw_, cy, sy);
+            // RCLCPP_INFO(get_logger(), "   CMD: VX=%.3f, VY=%.3f, VW=%.3f", twist.linear.x, twist.linear.y, twist.angular.z);
 
-    //         RCLCPP_INFO(get_logger(), "========================================");
-    // }
+            RCLCPP_INFO(get_logger(), "========================================");
+    }
 
     
 
     // PD Controller (Gains: kp=3.0, kd=0.1)
-    double vx_world = target_vx + 2.0 * err_x + 0.01 * (target_vx - current_vx_world_);
-    double vy_world = target_vy + 2.0 * err_y + 0.01 * (target_vy - current_vy_world_);
+    double vx_world = target_vx + 3.0 * err_x + 0.01 * (target_vx - current_vx_world_);
+    double vy_world = target_vy + 3.0 * err_y + 0.01 * (target_vy - current_vy_world_);
 
     
 
