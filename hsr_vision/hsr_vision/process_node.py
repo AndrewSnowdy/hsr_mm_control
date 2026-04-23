@@ -33,9 +33,9 @@ class HSRPersonTracker(Node):
         # --- Class-Specific Configs ---
         self.class_configs = {
             "person":      {"thresh": 2,  "dist": 1.2, "timeout": 0.5, "color": (0.2, 0.4, 1.0)}, # Blue
-            "prox_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (1.0, 0.0, 0.0)}, # Red
+            "prox_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (1.0, 0.5, 0.0)}, # Orange
             "push_button": {"thresh": 12, "dist": 0.5, "timeout": 10.0, "color": (0.0, 1.0, 0.0)}, # Green
-            "door":        {"thresh": 18,  "dist": 0.5, "timeout": 45.0,  "color": (1.0, 0.5, 0.0)}, # orange
+            "door":        {"thresh": 18,  "dist": 0.5, "timeout": 45.0,  "color": (1.0, 0.0, 0.0)}, # Red
             "bottle":      {"thresh": 5,  "dist": 0.4, "timeout": 2.0,  "color": (1.0, 1.0, 0.0)}, # Yellow
             "default":     {"thresh": 5,  "dist": 0.5, "timeout": 1.0, "color": (0.5, 0.5, 0.5)}
 }

@@ -14,11 +14,11 @@ import time
 
 
 CLASS_COLORS = {
-    "person":      (255, 102, 51),   # Blue (tracker: 0.2, 0.4, 1.0)
-    "prox_button": (0, 0, 255),      # Red
-    "push_button": (0, 255, 0),      # Green
-    "door":        (0, 128, 255),    # Orange
-    "bottle":      (0, 255, 255),    # Yellow
+    "person":      (255, 102, 51),   # Blue (BGR)
+    "prox_button": (0, 165, 255),    # Orange (BGR)
+    "push_button": (0, 255, 0),      # Green (BGR)
+    "door":        (0, 0, 255),      # Red (BGR)
+    "bottle":      (0, 255, 255),    # Yellow (BGR)
 }
 
 class HSRDetailedProfileNode(Node):
@@ -194,13 +194,6 @@ class HSRDetailedProfileNode(Node):
     #             det_array.detections.append(det)
 
     # Define matching colors (BGR for OpenCV - note RGB->BGR swap)
-CLASS_COLORS = {
-    "person":      (255, 102, 51),   # Blue (tracker: 0.2, 0.4, 1.0)
-    "prox_button": (0, 0, 255),      # Red
-    "push_button": (0, 255, 0),      # Green
-    "door":        (0, 128, 255),    # Orange
-    "bottle":      (0, 255, 255),    # Yellow
-}
 
     def process_results(self, results, label_prefix, color, img, det_array):
         boxes = results[0].boxes
