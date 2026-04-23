@@ -12,6 +12,15 @@ import cv2
 import numpy as np
 import time
 
+
+CLASS_COLORS = {
+    "person":      (255, 102, 51),   # Blue (tracker: 0.2, 0.4, 1.0)
+    "prox_button": (0, 0, 255),      # Red
+    "push_button": (0, 255, 0),      # Green
+    "door":        (0, 128, 255),    # Orange
+    "bottle":      (0, 255, 255),    # Yellow
+}
+
 class HSRDetailedProfileNode(Node):
     def __init__(self):
         super().__init__('hsr_detailed_profile_node')
@@ -104,11 +113,11 @@ class HSRDetailedProfileNode(Node):
         detection_array.header = msg.header
 
         # Draw Humans
-        self.process_results(human_results, None, (0, 255, 0), cv_image, detection_array)
+        self.process_results(human_results, None, None, cv_image, detection_array)
 
         # Draw Buttons from the last time we found them (No flicker!)
         if self.latest_button is not None:
-            self.process_results(self.latest_button, None, (255, 0, 0), cv_image, detection_array)
+            self.process_results(self.latest_button, None, None, cv_image, detection_array)
 
         self.detection_pub.publish(detection_array)
         # t_post_vis = time.perf_counter()
@@ -162,9 +171,40 @@ class HSRDetailedProfileNode(Node):
         det.results.append(hyp)
         return det
 
+    # def process_results(self, results, label_prefix, color, img, det_array):
+    #     boxes = results[0].boxes
+    #     names = results[0].names  # The dictionary of class names from the model
+        
+    #     if boxes is not None:
+    #         for box in boxes:
+    #             x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
+    #             conf = float(box.conf[0].cpu().numpy())
+    #             cls_id = int(box.cls[0].cpu().numpy())
+                
+    #             # If prefix is None, use the actual YOLO class name (door, prox_button, etc.)
+    #             actual_label = label_prefix if label_prefix else names[cls_id]
+                
+    #             # Draw on image
+    #             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+    #             cv2.putText(img, f"{actual_label} {conf:.2f}", (x1, y1 - 10),
+    #                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+    #             # Add to ROS message with the SPECIFIC class name
+    #             det = self.create_detection_msg(actual_label, conf, [x1, y1, x2, y2], det_array.header)
+    #             det_array.detections.append(det)
+
+    # Define matching colors (BGR for OpenCV - note RGB->BGR swap)
+CLASS_COLORS = {
+    "person":      (255, 102, 51),   # Blue (tracker: 0.2, 0.4, 1.0)
+    "prox_button": (0, 0, 255),      # Red
+    "push_button": (0, 255, 0),      # Green
+    "door":        (0, 128, 255),    # Orange
+    "bottle":      (0, 255, 255),    # Yellow
+}
+
     def process_results(self, results, label_prefix, color, img, det_array):
         boxes = results[0].boxes
-        names = results[0].names  # The dictionary of class names from the model
+        names = results[0].names
         
         if boxes is not None:
             for box in boxes:
@@ -172,15 +212,15 @@ class HSRDetailedProfileNode(Node):
                 conf = float(box.conf[0].cpu().numpy())
                 cls_id = int(box.cls[0].cpu().numpy())
                 
-                # If prefix is None, use the actual YOLO class name (door, prox_button, etc.)
                 actual_label = label_prefix if label_prefix else names[cls_id]
                 
-                # Draw on image
-                cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                # Look up color by label, fall back to passed color
+                draw_color = CLASS_COLORS.get(actual_label, color)
+                
+                cv2.rectangle(img, (x1, y1), (x2, y2), draw_color, 2)
                 cv2.putText(img, f"{actual_label} {conf:.2f}", (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw_color, 2)
 
-                # Add to ROS message with the SPECIFIC class name
                 det = self.create_detection_msg(actual_label, conf, [x1, y1, x2, y2], det_array.header)
                 det_array.detections.append(det)
 

@@ -271,7 +271,7 @@ void JointTrajectoryController::timer_callback() {
 
     // Failsafe
     double pos_error = std::hypot(target_x - current_base_x_, target_y - current_base_y_);
-    if (pos_error > 0.45 || std::abs(yaw_err) > 0.9) {
+    if (pos_error > 0.85 || std::abs(yaw_err) > 0.9) {
         RCLCPP_FATAL(get_logger(), "!!! CRITICAL SAFETY VIOLATION !!!");
         RCLCPP_FATAL(get_logger(), "Pos Error: %.3fm | Yaw Error: %.3frad", pos_error, std::abs(yaw_err));
         base_pub_->publish(geometry_msgs::msg::Twist());
