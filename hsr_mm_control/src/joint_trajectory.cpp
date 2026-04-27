@@ -166,7 +166,7 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     // We use the max of current speed or target speed to ensure we don't stall.
     double v_start = std::hypot(current_vx_, current_vy_);
     double v_avg = (v_start + target_v_mag) / 2.0;
-    v_avg = std::clamp(v_avg, 0.2, 0.55); // Minimum 0.1m/s to avoid infinite time
+    v_avg = std::clamp(v_avg, 0.1, 0.55); // Minimum 0.1m/s to avoid infinite time
 
     // Golden Rule: Time = Distance / Speed
     double T_kinematic = L / v_avg;
@@ -178,7 +178,7 @@ void JointTrajectoryController::on_goal_recieved(const sensor_msgs::msg::JointSt
     }
     
     // Final T: At least 1.5s for stability, but matches physics for the sprint
-    double T_dynamic = std::max({T_kinematic, max_arm_delta / 0.4, 1.0}); 
+    double T_dynamic = std::max({T_kinematic, max_arm_delta / 0.4, 1.5}); 
     
 
     double raw_goal_yaw = goal_pos["base_yaw"];

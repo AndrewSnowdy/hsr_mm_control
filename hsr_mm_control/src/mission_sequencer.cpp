@@ -73,97 +73,142 @@ public:
         return BT::NodeStatus::RUNNING;
     }
 
+    // BT::NodeStatus onRunning() override {
+    //     if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::RUNNING;
+    //     auto robot = s_->get_base_position();
+    //     if (!robot) return BT::NodeStatus::RUNNING;
+
+    //     // 1. Compute the ultimate goal
+    //     auto final_standoff = feasible_standoff_utils::compute_circular_target(
+    //         target_button_.position.x, target_button_.position.y,
+    //         robot->x, robot->y, 1.25);
+
+    //     // 2. Get obstacle-aware waypoint (may be a boundary exit point or final_standoff itself)
+    //     auto next_wp = feasible_standoff_utils::compute_next_waypoint(
+    //         robot->x, robot->y, final_standoff, s_->get_latest_costmap());
+
+    //     // 3. Blend smoothly back to final_standoff as path clears
+    //     double deviation = std::hypot(
+    //         next_wp.position.x - final_standoff.position.x,
+    //         next_wp.position.y - final_standoff.position.y);
+    //     const double blend_threshold = 0.5;
+    //     double alpha = std::clamp(1.0 - (deviation / blend_threshold), 0.0, 1.0);
+
+    //     geometry_msgs::msg::Pose avoidance_target;
+    //     avoidance_target.position.x = next_wp.position.x + alpha * (final_standoff.position.x - next_wp.position.x);
+    //     avoidance_target.position.y = next_wp.position.y + alpha * (final_standoff.position.y - next_wp.position.y);
+    //     avoidance_target.position.z = 0.0;
+    //     feasible_standoff_utils::set_pose_yaw(avoidance_target,
+    //         std::atan2(final_standoff.position.y - avoidance_target.position.y,
+    //                    final_standoff.position.x - avoidance_target.position.x));
+
+    //     // 4. Trapezoidal interpolation — same as your original, but toward avoidance_target
+    //     double dist_to_target = std::hypot(
+    //         avoidance_target.position.x - robot->x,
+    //         avoidance_target.position.y - robot->y);
+
+    //     if (start_dist_ < 0) {
+    //         start_dist_ = dist_to_target;
+    //         start_pose_ = robot->pose;
+    //     }
+
+    //     double progress = 1.0 - (dist_to_target / start_dist_);
+    //     double target_yaw;
+    //     if (deviation > 0.1) {
+    //         // Face the direction of the bypass/avoidance target
+    //         target_yaw = std::atan2(avoidance_target.position.y - robot->y, 
+    //                                 avoidance_target.position.x - robot->x);
+    //     } else {
+    //         // We are on the final stretch, face the button (target_button_ is the actual button)
+    //         target_yaw = std::atan2(target_button_.position.y - robot->y, 
+    //                                 target_button_.position.x - robot->x);
+    //     }
+    //     feasible_standoff_utils::set_pose_yaw(avoidance_target, target_yaw);
+
+    //     // 4. Execution
+    //     // Use the 'heading' variable you already calculated for the publish_mission_goal
+    //     double heading = target_yaw;
+
+    //     if (progress < 0.22) {
+    //         auto wp = s_->interpolate_pose(start_pose_, avoidance_target, 0.33);
+    //         s_->publish_mission_goal(wp, false, 0.15, heading, false, 0.1);
+    //     } else if (progress < 0.7) {
+    //         auto wp = s_->interpolate_pose(start_pose_, avoidance_target, 0.80);
+    //         s_->publish_mission_goal(wp, false, 0.15, heading, false, 0.1);
+    //     } else {
+    //         s_->publish_mission_goal(avoidance_target, false, 0.0, heading, false, 0.1);
+    //     }
+
+    //     // 5. Reset interpolation when avoidance_target shifts significantly
+    //     // (obstacle cleared, target jumps back toward final_standoff)
+    //     if (std::hypot(avoidance_target.position.x - last_target_.position.x,
+    //                    avoidance_target.position.y - last_target_.position.y) > 0.3) {
+    //         start_dist_ = -1.0;
+    //         start_pose_ = robot->pose;
+    //     }
+    //     last_target_ = avoidance_target;
+
+    //     // Visualization
+    //     bool is_avoiding = deviation > 0.1;
+    //     visualization_msgs::msg::MarkerArray debug_markers;
+    //     visualization_msgs::msg::Marker ray;
+    //     ray.header.frame_id = "odom"; ray.header.stamp = s_->now();
+    //     ray.ns = "approach"; ray.id = 0;
+    //     ray.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    //     ray.scale.x = 0.03; ray.color.a = 1.0;
+    //     ray.color.r = is_avoiding ? 1.0 : 0.0;
+    //     ray.color.g = is_avoiding ? 0.0 : 1.0;
+    //     geometry_msgs::msg::Point p1, p2;
+    //     p1.x = robot->x; p1.y = robot->y; p1.z = 0.05;
+    //     p2.x = avoidance_target.position.x; p2.y = avoidance_target.position.y; p2.z = 0.05;
+    //     ray.points.push_back(p1); ray.points.push_back(p2);
+    //     debug_markers.markers.push_back(ray);
+    //     s_->marker_array_pub2_->publish(debug_markers);
+
+    //     if (s_->base_close_xyw(*robot, final_standoff, 0.10, 0.20)) {
+    //         RCLCPP_INFO(s_->get_logger(), "BT: Approach complete.");
+    //         return BT::NodeStatus::SUCCESS;
+    //     }
+
+    //     return BT::NodeStatus::RUNNING;
+    // }
     BT::NodeStatus onRunning() override {
         if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::RUNNING;
         auto robot = s_->get_base_position();
         if (!robot) return BT::NodeStatus::RUNNING;
 
-        // 1. Compute the ultimate goal
+        // Direct standoff — no obstacle avoidance
         auto final_standoff = feasible_standoff_utils::compute_circular_target(
             target_button_.position.x, target_button_.position.y,
             robot->x, robot->y, 1.25);
 
-        // 2. Get obstacle-aware waypoint (may be a boundary exit point or final_standoff itself)
-        auto next_wp = feasible_standoff_utils::compute_next_waypoint(
-            robot->x, robot->y, final_standoff, s_->get_latest_costmap());
+        double target_yaw = std::atan2(
+            target_button_.position.y - robot->y,
+            target_button_.position.x - robot->x);
 
-        // 3. Blend smoothly back to final_standoff as path clears
-        double deviation = std::hypot(
-            next_wp.position.x - final_standoff.position.x,
-            next_wp.position.y - final_standoff.position.y);
-        const double blend_threshold = 0.5;
-        double alpha = std::clamp(1.0 - (deviation / blend_threshold), 0.0, 1.0);
-
-        geometry_msgs::msg::Pose avoidance_target;
-        avoidance_target.position.x = next_wp.position.x + alpha * (final_standoff.position.x - next_wp.position.x);
-        avoidance_target.position.y = next_wp.position.y + alpha * (final_standoff.position.y - next_wp.position.y);
-        avoidance_target.position.z = 0.0;
-        feasible_standoff_utils::set_pose_yaw(avoidance_target,
-            std::atan2(final_standoff.position.y - avoidance_target.position.y,
-                       final_standoff.position.x - avoidance_target.position.x));
-
-        // 4. Trapezoidal interpolation — same as your original, but toward avoidance_target
-        double dist_to_target = std::hypot(
-            avoidance_target.position.x - robot->x,
-            avoidance_target.position.y - robot->y);
+        feasible_standoff_utils::set_pose_yaw(final_standoff, target_yaw);
 
         if (start_dist_ < 0) {
-            start_dist_ = dist_to_target;
+            start_dist_ = std::hypot(
+                final_standoff.position.x - robot->x,
+                final_standoff.position.y - robot->y);
             start_pose_ = robot->pose;
         }
 
-        double progress = 1.0 - (dist_to_target / start_dist_);
-        double target_yaw;
-        if (deviation > 0.1) {
-            // Face the direction of the bypass/avoidance target
-            target_yaw = std::atan2(avoidance_target.position.y - robot->y, 
-                                    avoidance_target.position.x - robot->x);
-        } else {
-            // We are on the final stretch, face the button (target_button_ is the actual button)
-            target_yaw = std::atan2(target_button_.position.y - robot->y, 
-                                    target_button_.position.x - robot->x);
-        }
-        feasible_standoff_utils::set_pose_yaw(avoidance_target, target_yaw);
-
-        // 4. Execution
-        // Use the 'heading' variable you already calculated for the publish_mission_goal
-        double heading = target_yaw;
+        double dist = std::hypot(
+            final_standoff.position.x - robot->x,
+            final_standoff.position.y - robot->y);
+        double progress = 1.0 - (dist / std::max(start_dist_, 0.01));
 
         if (progress < 0.22) {
-            auto wp = s_->interpolate_pose(start_pose_, avoidance_target, 0.33);
-            s_->publish_mission_goal(wp, false, 0.15, heading, false, 0.1);
+            auto wp = s_->interpolate_pose(start_pose_, final_standoff, 0.33);
+            s_->publish_mission_goal(wp, false, 0.15, target_yaw, false, 0.1);
         } else if (progress < 0.7) {
-            auto wp = s_->interpolate_pose(start_pose_, avoidance_target, 0.80);
-            s_->publish_mission_goal(wp, false, 0.15, heading, false, 0.1);
+            auto wp = s_->interpolate_pose(start_pose_, final_standoff, 0.80);
+            s_->publish_mission_goal(wp, false, 0.15, target_yaw, false, 0.1);
         } else {
-            s_->publish_mission_goal(avoidance_target, false, 0.0, heading, false, 0.1);
+            s_->publish_mission_goal(final_standoff, false, 0.0, target_yaw, false, 0.1);
         }
-
-        // 5. Reset interpolation when avoidance_target shifts significantly
-        // (obstacle cleared, target jumps back toward final_standoff)
-        if (std::hypot(avoidance_target.position.x - last_target_.position.x,
-                       avoidance_target.position.y - last_target_.position.y) > 0.3) {
-            start_dist_ = -1.0;
-            start_pose_ = robot->pose;
-        }
-        last_target_ = avoidance_target;
-
-        // Visualization
-        bool is_avoiding = deviation > 0.1;
-        visualization_msgs::msg::MarkerArray debug_markers;
-        visualization_msgs::msg::Marker ray;
-        ray.header.frame_id = "odom"; ray.header.stamp = s_->now();
-        ray.ns = "approach"; ray.id = 0;
-        ray.type = visualization_msgs::msg::Marker::LINE_STRIP;
-        ray.scale.x = 0.03; ray.color.a = 1.0;
-        ray.color.r = is_avoiding ? 1.0 : 0.0;
-        ray.color.g = is_avoiding ? 0.0 : 1.0;
-        geometry_msgs::msg::Point p1, p2;
-        p1.x = robot->x; p1.y = robot->y; p1.z = 0.05;
-        p2.x = avoidance_target.position.x; p2.y = avoidance_target.position.y; p2.z = 0.05;
-        ray.points.push_back(p1); ray.points.push_back(p2);
-        debug_markers.markers.push_back(ray);
-        s_->marker_array_pub2_->publish(debug_markers);
 
         if (s_->base_close_xyw(*robot, final_standoff, 0.10, 0.20)) {
             RCLCPP_INFO(s_->get_logger(), "BT: Approach complete.");
@@ -295,13 +340,13 @@ public:
 
         auto press_pose = feasible_standoff_utils::compute_ee_target(
             target_button_.position.x, target_button_.position.y, target_button_.position.z, 
-            standoff_yaw_, 0.09);
+            standoff_yaw_, 0.088);
         
         s_->set_yaw(press_pose, standoff_yaw_);
         s_->publish_mission_goal(press_pose, true, 0.0, 0.0, true, gripper);
 
         // 1. Check if we have arrived at the proximity zone
-        bool is_close = s_->ee_close_xyz(*ee_pos, press_pose.position.x, press_pose.position.y, press_pose.position.z, 0.02);
+        bool is_close = s_->ee_close_xyz(*ee_pos, press_pose.position.x, press_pose.position.y, press_pose.position.z, 0.031);
 
         if (is_close) {
             // 2. If this is the FIRST time we are close, start the timer
@@ -472,10 +517,102 @@ private:
 
 
 
+// class GraspAndRetract : public BT::StatefulActionNode {
+// public:
+//     GraspAndRetract(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
+//         : BT::StatefulActionNode(name, config), s_(s), action_started_(false) {}
+
+//     static BT::PortsList providedPorts() {
+//         return { BT::InputPort<geometry_msgs::msg::Pose>("btn_pose"),
+//                  BT::InputPort<double>("locked_yaw"),
+//                  BT::InputPort<double>("depth") };
+//     }
+
+//     BT::NodeStatus onStart() override {
+//         if (!getInput("btn_pose", target_button_)) return BT::NodeStatus::FAILURE;
+//         if (!getInput("locked_yaw", standoff_yaw_)) return BT::NodeStatus::FAILURE;
+//         getInput("depth", target_depth_);
+        
+//         // Reset local state for this specific BT activation
+//         action_started_ = false; 
+//         return BT::NodeStatus::RUNNING;
+//     }
+
+//     BT::NodeStatus onRunning() override {
+//         auto ee_pos = s_->get_ee_position();
+//         if (!ee_pos) return BT::NodeStatus::RUNNING;
+
+//         auto target_pose = feasible_standoff_utils::compute_ee_target(
+//             target_button_.position.x, target_button_.position.y, target_button_.position.z,
+//             standoff_yaw_, target_depth_);
+
+//         // Determine gripper widths based on mode
+//         // Grasp: Approach Open (1.2) -> Action Close (0.1)
+//         // Release: Approach Closed (0.1) -> Action Open (1.2)
+//         double approach_gripper = (s_->current_mode == "grasp") ? 1.2 : 0.3;
+//         double action_gripper   = (s_->current_mode == "grasp") ? 0.3 : 1.2;
+
+//         // --- PHASE 1: APPROACHING ---
+//         if (!action_started_) {
+//             s_->set_yaw(target_pose, standoff_yaw_);
+//             s_->publish_mission_goal(target_pose, true, 0.0, 0.0, true, approach_gripper);
+
+//             if (s_->ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.02)) {
+//                 RCLCPP_INFO(s_->get_logger(), "BT: Reached object. Starting %s...", s_->current_mode.c_str());
+//                 action_started_ = true;
+                
+//                 // Trigger the weld/unweld plugin
+//                 std_msgs::msg::Empty msg;
+//                 if (s_->current_mode == "grasp") {
+//                     s_->grasp_attach_pub_->publish(msg);
+//                 } else {
+//                     s_->grasp_detach_pub_->publish(msg);
+//                 }
+                
+//                 start_action_time_ = s_->now();
+//             }
+//             return BT::NodeStatus::RUNNING;
+//         }
+
+//         // --- PHASE 2: EXECUTING ACTION ---
+//         if (action_started_) {
+//             s_->publish_mission_goal(target_pose, true, 0.0, 0.0, true, action_gripper);
+
+//             auto elapsed = (s_->now() - start_action_time_).seconds();
+//             if (elapsed > 1.5) { 
+//                 RCLCPP_INFO(s_->get_logger(), "BT: %s firm. Task Complete.", s_->current_mode.c_str());
+                
+//                 // Toggle the mode so the NEXT time this node is called, it does the opposite
+//                 if (s_->current_mode == "grasp") {
+//                     s_->current_mode = "release";
+//                     s_->depth_offset = 0.01;
+//                 } else {
+//                     s_->current_mode = "grasp";
+//                     s_->depth_offset = 0.0;
+//                 }
+
+//                 return BT::NodeStatus::SUCCESS;
+//             }
+//         }
+
+//         return BT::NodeStatus::RUNNING;
+//     }
+
+//     void onHalted() override {}
+
+// private:
+//     MissionSequencer* s_;
+//     geometry_msgs::msg::Pose target_button_;
+//     double standoff_yaw_, target_depth_;
+//     bool action_started_; 
+//     rclcpp::Time start_action_time_;
+// };
+
+
 class GraspAndRetract : public BT::StatefulActionNode {
 public:
     GraspAndRetract(const std::string& name, const BT::NodeConfig& config, MissionSequencer* s)
-        : BT::StatefulActionNode(name, config), s_(s), action_started_(false) {}
+        : BT::StatefulActionNode(name, config), s_(s), action_started_(false), backup_started_(false) {}
 
     static BT::PortsList providedPorts() {
         return { BT::InputPort<geometry_msgs::msg::Pose>("btn_pose"),
@@ -488,8 +625,8 @@ public:
         if (!getInput("locked_yaw", standoff_yaw_)) return BT::NodeStatus::FAILURE;
         getInput("depth", target_depth_);
         
-        // Reset local state for this specific BT activation
-        action_started_ = false; 
+        action_started_ = false;
+        backup_started_ = false;
         return BT::NodeStatus::RUNNING;
     }
 
@@ -501,9 +638,6 @@ public:
             target_button_.position.x, target_button_.position.y, target_button_.position.z,
             standoff_yaw_, target_depth_);
 
-        // Determine gripper widths based on mode
-        // Grasp: Approach Open (1.2) -> Action Close (0.1)
-        // Release: Approach Closed (0.1) -> Action Open (1.2)
         double approach_gripper = (s_->current_mode == "grasp") ? 1.2 : 0.3;
         double action_gripper   = (s_->current_mode == "grasp") ? 0.3 : 1.2;
 
@@ -512,32 +646,30 @@ public:
             s_->set_yaw(target_pose, standoff_yaw_);
             s_->publish_mission_goal(target_pose, true, 0.0, 0.0, true, approach_gripper);
 
-            if (s_->ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.02)) {
+            if (s_->ee_close_xyz(*ee_pos, target_pose.position.x, target_pose.position.y, target_pose.position.z, 0.035)) {
                 RCLCPP_INFO(s_->get_logger(), "BT: Reached object. Starting %s...", s_->current_mode.c_str());
                 action_started_ = true;
-                
-                // Trigger the weld/unweld plugin
+
                 std_msgs::msg::Empty msg;
                 if (s_->current_mode == "grasp") {
                     s_->grasp_attach_pub_->publish(msg);
                 } else {
                     s_->grasp_detach_pub_->publish(msg);
                 }
-                
                 start_action_time_ = s_->now();
             }
             return BT::NodeStatus::RUNNING;
         }
 
-        // --- PHASE 2: EXECUTING ACTION ---
-        if (action_started_) {
+        // --- PHASE 2: EXECUTING GRASP/RELEASE ---
+        if (action_started_ && !backup_started_) {
             s_->publish_mission_goal(target_pose, true, 0.0, 0.0, true, action_gripper);
 
             auto elapsed = (s_->now() - start_action_time_).seconds();
-            if (elapsed > 1.5) { 
-                RCLCPP_INFO(s_->get_logger(), "BT: %s firm. Task Complete.", s_->current_mode.c_str());
-                
-                // Toggle the mode so the NEXT time this node is called, it does the opposite
+            if (elapsed > 1.5) {
+                RCLCPP_INFO(s_->get_logger(), "BT: %s firm. Starting backup...", s_->current_mode.c_str());
+
+                // Toggle mode
                 if (s_->current_mode == "grasp") {
                     s_->current_mode = "release";
                     s_->depth_offset = 0.01;
@@ -546,6 +678,30 @@ public:
                     s_->depth_offset = 0.0;
                 }
 
+                // Pre-calculate backup goal once using standoff_yaw_
+                auto robot = s_->get_base_position();
+                if (!robot) return BT::NodeStatus::RUNNING;
+                double retreat_yaw = standoff_yaw_ + M_PI;
+                backup_goal_.position.x = robot->x + 0.35 * std::cos(retreat_yaw);
+                backup_goal_.position.y = robot->y + 0.35 * std::sin(retreat_yaw);
+                backup_goal_.position.z = 0.0;
+                s_->set_yaw(backup_goal_, standoff_yaw_); // keep facing object while reversing
+
+                backup_started_ = true;
+            }
+            return BT::NodeStatus::RUNNING;
+        }
+
+        // --- PHASE 3: BACKING UP ---
+        if (backup_started_) {
+            auto robot = s_->get_base_position();
+            if (!robot) return BT::NodeStatus::RUNNING;
+
+            s_->publish_mission_goal(backup_goal_, false, 0.0, standoff_yaw_, false, s_->target_gripper);
+
+            if (s_->base_close_xyw(*robot, backup_goal_, 0.08, 0.25)) {
+                RCLCPP_INFO(s_->get_logger(), "BT: Backup complete. GraspAndRetract done.");
+                s_->force_wrist_flat = false;
                 return BT::NodeStatus::SUCCESS;
             }
         }
@@ -558,8 +714,11 @@ public:
 private:
     MissionSequencer* s_;
     geometry_msgs::msg::Pose target_button_;
+    geometry_msgs::msg::Pose target_pose_;
+    geometry_msgs::msg::Pose backup_goal_;
     double standoff_yaw_, target_depth_;
-    bool action_started_; 
+    bool action_started_;
+    bool backup_started_;
     rclcpp::Time start_action_time_;
 };
 
@@ -1115,69 +1274,148 @@ int main(int argc, char ** argv)
             return std::make_unique<IsDoorOpen>(name, config, sequencer_node.get());
         });
 
+    // std::string xml_text = R"(
+    // <root BTCPP_format="4">
+    //     <BehaviorTree ID="MainTree">
+    //         <Sequence name="root_sequence">
+    //             <RetryUntilSuccessful num_attempts="-1">
+    //                 <Sequence>
+    //                     <Sleep msec="100"/>
+    //                     <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
+    //                 </Sequence>
+    //             </RetryUntilSuccessful>
+
+    //             <ReactiveSequence name="adaptive_approach">
+    //                 <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
+    //                 <ApproachButton btn_pose="{target_loc}"/>
+    //             </ReactiveSequence>
+
+    //             <Fallback name="action_selector">
+                    
+    //                 <Sequence name="grasp_branch">
+    //                     <Precondition if="target_type == 'bottle'" else="FAILURE">
+    //                         <Sequence>
+    //                             <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
+    //                             <GraspAndRetract btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.04"/>
+    //                             <Script code=" is_carrying := true; target_gripper := -0.1 "/>
+    //                         </Sequence>
+    //                     </Precondition>
+    //                 </Sequence>
+
+    //                 <Sequence name="door_full_sequence">
+    //                     <Fallback name="door_decision_gate">
+    //                         <IsDoorOpen door_info="{door_data}"/>
+
+    //                         <Sequence name="press_button_flow">
+    //                             <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
+    //                             <Fallback name="press_selector">
+    //                                 <Sequence name="push_branch">
+    //                                     <Script code=" is_push := (target_type == 'push_button') "/>
+    //                                     <Precondition if="is_push" else="FAILURE">
+    //                                         <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.085"/>
+    //                                     </Precondition>
+    //                                 </Sequence>
+    //                                 <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.4"/>
+    //                             </Fallback>
+    //                             <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
+    //                         </Sequence>
+    //                     </Fallback>
+                        
+    //                     <RetryUntilSuccessful num_attempts="-1">
+    //                         <Fallback name="exit_or_wait">
+    //                             <ReactiveSequence name="guarded_exit">
+    //                                 <IsPathClear />
+    //                                 <ExitDoor door_info="{door_data}"/>
+    //                             </ReactiveSequence>
+    //                             <ForceFailure>
+    //                                 <Sequence name="safety_standby">
+    //                                     <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
+    //                                     <Sleep msec="500"/>
+    //                                 </Sequence>
+    //                             </ForceFailure>
+    //                         </Fallback>
+    //                     </RetryUntilSuccessful>
+    //                 </Sequence> 
+    //             </Fallback>
+    //         </Sequence>
+    //     </BehaviorTree>
+    // </root>
+    // )";
+
     std::string xml_text = R"(
     <root BTCPP_format="4">
         <BehaviorTree ID="MainTree">
-            <Sequence name="root_sequence">
+            <Sequence name="full_mission">
+
+                <!-- STAGE 1: Find and grab the bottle -->
                 <RetryUntilSuccessful num_attempts="-1">
                     <Sequence>
                         <Sleep msec="100"/>
                         <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
+                        <Precondition if="target_type == 'bottle'" else="FAILURE">
+                            <AlwaysSuccess/>
+                        </Precondition>
                     </Sequence>
                 </RetryUntilSuccessful>
 
-                <ReactiveSequence name="adaptive_approach">
+                <ReactiveSequence name="approach_bottle">
                     <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
                     <ApproachButton btn_pose="{target_loc}"/>
                 </ReactiveSequence>
 
-                <Fallback name="action_selector">
-                    
-                    <Sequence name="grasp_branch">
-                        <Precondition if="target_type == 'bottle'" else="FAILURE">
-                            <Sequence>
-                                <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
-                                <GraspAndRetract btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.04"/>
-                                <Script code=" is_carrying := true; target_gripper := -0.1 "/>
-                            </Sequence>
+                <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}"/>
+                <GraspAndRetract btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.065 "/>
+                <Script code=" target_gripper := -0.1 "/>
+
+                <!-- STAGE 2: Find the door button -->
+                <RetryUntilSuccessful num_attempts="-1">
+                    <Sequence>
+                        <Sleep msec="100"/>
+                        <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
+                        <Precondition if="target_type != 'bottle'" else="FAILURE">
+                            <AlwaysSuccess/>
                         </Precondition>
                     </Sequence>
+                </RetryUntilSuccessful>
 
-                    <Sequence name="door_full_sequence">
-                        <Fallback name="door_decision_gate">
-                            <IsDoorOpen door_info="{door_data}"/>
+                <ReactiveSequence name="approach_door_button">
+                    <SearchForButton btn_pose="{target_loc}" btn_type="{target_type}" door_info="{door_data}"/>
+                    <ApproachButton btn_pose="{target_loc}"/>
+                </ReactiveSequence>
 
-                            <Sequence name="press_button_flow">
-                                <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}" />
-                                <Fallback name="press_selector">
-                                    <Sequence name="push_branch">
-                                        <Script code=" is_push := (target_type == 'push_button') "/>
-                                        <Precondition if="is_push" else="FAILURE">
-                                            <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.085"/>
-                                        </Precondition>
-                                    </Sequence>
-                                    <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.4"/>
-                                </Fallback>
-                                <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
+                <!-- STAGE 3: Press button and go through door -->
+                <Fallback name="door_decision_gate">
+                    <IsDoorOpen door_info="{door_data}"/>
+                    <Sequence name="press_button_flow">
+                        <PrePress btn_pose="{target_loc}" final_yaw="{locked_yaw}"/>
+                        <Fallback name="press_selector">
+                            <Sequence name="push_branch">
+                                <Script code=" is_push := (target_type == 'push_button') "/>
+                                <Precondition if="is_push" else="FAILURE">
+                                    <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.085"/>
+                                </Precondition>
                             </Sequence>
+                            <PressButton btn_pose="{target_loc}" locked_yaw="{locked_yaw}" depth="0.4"/>
                         </Fallback>
-                        
-                        <RetryUntilSuccessful num_attempts="-1">
-                            <Fallback name="exit_or_wait">
-                                <ReactiveSequence name="guarded_exit">
-                                    <IsPathClear />
-                                    <ExitDoor door_info="{door_data}"/>
-                                </ReactiveSequence>
-                                <ForceFailure>
-                                    <Sequence name="safety_standby">
-                                        <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
-                                        <Sleep msec="500"/>
-                                    </Sequence>
-                                </ForceFailure>
-                            </Fallback>
-                        </RetryUntilSuccessful>
-                    </Sequence> 
+                        <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
+                    </Sequence>
                 </Fallback>
+
+                <RetryUntilSuccessful num_attempts="-1">
+                    <Fallback name="exit_or_wait">
+                        <ReactiveSequence name="guarded_exit">
+                            <IsPathClear/>
+                            <ExitDoor door_info="{door_data}"/>
+                        </ReactiveSequence>
+                        <ForceFailure>
+                            <Sequence name="safety_standby">
+                                <Retract btn_pose="{target_loc}" door_info="{door_data}"/>
+                                <Sleep msec="500"/>
+                            </Sequence>
+                        </ForceFailure>
+                    </Fallback>
+                </RetryUntilSuccessful>
+
             </Sequence>
         </BehaviorTree>
     </root>
@@ -1208,12 +1446,13 @@ int main(int argc, char ** argv)
 
             // 3. Reset for the next door
             tree.haltTree(); 
-            status = BT::NodeStatus::IDLE;
+            // status = BT::NodeStatus::IDLE;
 
             RCLCPP_INFO(sequencer_node->get_logger(), "BT RESET: Waiting for Mission %d markers...", current_mission_index);
             
             // Give Python 500ms to swap markers before we start searching again
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            // std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            break;
         } 
         else if (status == BT::NodeStatus::FAILURE) {
             RCLCPP_ERROR(sequencer_node->get_logger(), "Mission Hard Failure. Resetting to try again.");

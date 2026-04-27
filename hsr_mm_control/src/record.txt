@@ -1,0 +1,25 @@
+ros2 bag record \
+  /whole_body/joint_states \
+  /feasible_samples \
+  /grasp_attach \
+  /grasp_detach \
+  /detected_objects \
+  /ghost_joint_states \
+  /scan \
+  /robot_description \
+  /door_safety_zone \
+  /tf_static \
+  /completed_mission_count \
+  /global_costmap/costmap_updates \
+  /rgb_PS1080_PrimeSense/rgb/image_rect_color/compressed \
+  /tf \
+  /ghost_robot_description \
+  /global_costmap/costmap \
+  /switched_odom \
+  /joint_states \
+  /visualization_marker
+
+
+  and on the jetson:
+
+  ros2 bag record /people_debug_image
