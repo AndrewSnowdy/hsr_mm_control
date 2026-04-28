@@ -1,10 +1,10 @@
 ## Hardware Runs
 
 ### Run 1
-<video src="media/run_1x2.mp4" controls></video>
+![](https://github.com/AndrewSnowdy/hsr_mm_control/blob/main/media/run_1x2.mp4?raw=true)
 
 ### Run 2
-<video src="media/run_2x2.mp4" controls></video>
+![](https://github.com/AndrewSnowdy/hsr_mm_control/blob/main/media/run_2x2.mp4?raw=true)
 
 ### Run 3
-<video src="media/run_3x2.mp4" controls></video>
+![](https://github.com/AndrewSnowdy/hsr_mm_control/blob/main/media/run_3x2.mp4?raw=true)
