@@ -4,6 +4,8 @@
 # 2. Allow the directories themselves (required for Git to look inside)
 !/hsr_mm_control/
 !/hsr_vision/
+!/media/
+!/readme/
 
 # 3. Allow the .gitignore itself
 !/.gitignore
