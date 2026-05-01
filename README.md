@@ -1,17 +1,9 @@
 ## Hardware Runs
 
-### Run 1
-# Unassisted door traversal
-![Run 1](media/run_1.gif)
+<video src="media/Scenario_hw_1.mp4" width="600" controls autoplay loop muted>
+  Your browser does not support the video tag.
+</video>
 
-### Run 2
-# Person interference
-![Run 2](media/run_2.gif)
-
-### Run 3
-# person assistance
-![Run 3](media/run_3.gif)
-
-### Run 4
-# manipulation and traversal
-![Run 3](media/run_4.gif)
+<video src="https://github.com/AndrewSnowdy/hsr_mm_control/raw/main/media/Scenario_hw_1.mp4" width="600" controls autoplay loop muted>
+  Your browser does not support the video tag.
+</video>
